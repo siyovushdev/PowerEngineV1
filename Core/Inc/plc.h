@@ -170,6 +170,8 @@ void     iwdg_feed(void);  // кормим watchdog
 */
 void TaskPlcScan(void* arg);
 
+void UartTx_Task(void *arg);  // создать один раз
+
 /* TaskComms:
    Читает кадры по UART и передаёт в handle_frame_from_host().
 */

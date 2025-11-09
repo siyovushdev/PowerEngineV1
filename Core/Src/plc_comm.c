@@ -1,167 +1,181 @@
 #include "plc_comm.h"
 #include "stm32f4xx_hal.h"
-// tinycbor / твой CBOR-инклюд добавишь позже
+#include "plc.h"
 
-extern UART_HandleTypeDef huart2;
+// TinyCBOR
+#include "cbor.h"  // поправь путь на свой tinycbor header
+#include "cbor_msg.h"
+#include "uart2_cmd_handler.h"
 
-/*
- * CRC16 MODBUS (0xA001 полином, начальное 0xFFFF)
- */
-uint16_t crc16_modbus(const uint8_t* data, uint16_t len)
-{
+#define FRAME_MAX_PAYLOAD  1024u
+
+// FSM
+static uint8_t  acc_buf[FRAME_MAX_PAYLOAD]; // храним только payload
+static uint16_t acc_len = 0;                // накоплено в payload-буфере
+static uint16_t acc_need = 0;               // сколько осталось дочитать (payload + CRC)
+static uint8_t  len_lo = 0, len_hi = 0;
+static bool     have_len_lo = false;
+static bool     have_len_hi = false;
+
+// временное хранение CRC байтов
+static uint8_t  crc_lo = 0, crc_hi = 0;
+
+static inline void rx_reset(void) {
+    have_len_lo = false;
+    have_len_hi = false;
+    len_lo = 0;
+    len_hi = 0;
+    acc_len = 0;
+    acc_need = 0;
+    crc_lo = 0;
+    crc_hi = 0;
+}
+
+/* -----------------------------------------
+ * CRC16 MODBUS (0xA001, init 0xFFFF)
+ * Считаем по [LEN_LO LEN_HI] + payload
+ * ----------------------------------------- */
+uint16_t crc16_modbus(const uint8_t *data, uint16_t len) {
     uint16_t crc = 0xFFFF;
+
+    // сначала два байта длины (младший, затем старший)
+    uint8_t hdr0 = (uint8_t)(len & 0xFF);
+    uint8_t hdr1 = (uint8_t)(len >> 8);
+
+    uint8_t in = hdr0;
+    for (uint8_t b = 0; b < 8; b++) {
+        uint16_t mix = (crc ^ in) & 1U;
+        crc >>= 1;
+        if (mix) crc ^= 0xA001U;
+        in >>= 1;
+    }
+    in = hdr1;
+    for (uint8_t b = 0; b < 8; b++) {
+        uint16_t mix = (crc ^ in) & 1U;
+        crc >>= 1;
+        if (mix) crc ^= 0xA001U;
+        in >>= 1;
+    }
+
+    // затем payload
     for (uint16_t i = 0; i < len; i++) {
-        crc ^= data[i];
+        uint8_t x = data[i];
         for (uint8_t b = 0; b < 8; b++) {
-            if (crc & 1U) {
-                crc = (crc >> 1) ^ 0xA001U;
-            } else {
-                crc = (crc >> 1);
-            }
+            uint16_t mix = (crc ^ x) & 1U;
+            crc >>= 1;
+            if (mix) crc ^= 0xA001U;
+            x >>= 1;
         }
     }
     return crc;
 }
 
-/*
- * uart_get_frame_blocking():
- *
- * Цель:
- * - Принять:
- *   2 байта длины (LE)
- *   payload (len байт)
- *   2 байта CRC16 (LE)
- *
- * - Проверить CRC16.
- * - Записать в out->len и out->payload.
- *
- * Сейчас даём заглушку, чтобы проект собрался и работал без связи.
- * Ты позже заменишь тело на нормальную реализацию через HAL_UART_Receive()
- * либо через свой Rx DMA / RxToIdle буфер.
- */
-bool uart_get_frame_blocking(Frame* out)
-{
-    (void)out;
-    // Заглушка: связи нет → говорим что новых кадров нет
-    // Возвращаем false, чтобы TaskComms просто крутилась.
-    return false;
+void process_bytes_in_task(const uint8_t *data, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        uint8_t b = data[i];
+
+        if (!have_len_lo) {           // ждём len_lo
+            len_lo = b;
+            have_len_lo = true;
+            continue;
+        }
+        if (!have_len_hi) {           // ждём len_hi
+            len_hi = b;
+            have_len_hi = true;
+
+            uint16_t payloadLen = (uint16_t)(((uint16_t)len_hi << 8) | len_lo);
+            // Важно: буфер хранит ТОЛЬКО payload; CRC хранится отдельно
+            if (payloadLen == 0 || payloadLen > FRAME_MAX_PAYLOAD) {
+                rx_reset();
+                continue;
+            }
+            acc_len = 0;
+            acc_need = (uint16_t)(payloadLen + 2); // payload + CRC(2)
+            continue;
+        }
+
+        // читаем payload + CRC
+        if (acc_need == 0) {
+            // неожиданный байт — полный сброс
+            rx_reset();
+            continue;
+        }
+
+        uint16_t payloadLen = (uint16_t)(((uint16_t)len_hi << 8) | len_lo);
+
+        if (acc_len < payloadLen) {
+            // ещё собираем payload
+            if (acc_len < FRAME_MAX_PAYLOAD) {
+                acc_buf[acc_len++] = b;
+            } else {
+                // переполнение защиты (не должно случаться из-за проверки выше)
+                rx_reset();
+                continue;
+            }
+        } else if (acc_len == payloadLen) {
+            // первый байт CRC (lo)
+            crc_lo = b;
+            acc_len++; // логический прогресс
+        } else if (acc_len == payloadLen + 1) {
+            // второй байт CRC (hi)
+            crc_hi = b;
+            acc_len++; // логический прогресс
+        }
+        acc_need--;
+
+        // кадр собран
+        if (acc_need == 0) {
+            // посчитать CRC по [LEN+payload]
+            uint16_t crc_calc = crc16_modbus(acc_buf, payloadLen);
+            uint16_t crc_rx   = (uint16_t)(((uint16_t)crc_hi << 8) | crc_lo); // на проводе [lo][hi]
+
+            if (crc_calc == crc_rx) {
+                Frame f;
+                f.len = payloadLen;
+                memcpy(f.payload, acc_buf, payloadLen);
+
+                CborReply rep;
+                on_cbor_frame_received(f.payload, f.len, &rep);
+                if (rep.len > 0) {
+
+                    uart_send(rep.data, rep.len, pdMS_TO_TICKS(5));
+                }
+            }
+            rx_reset(); // готов к следующему кадру
+        }
+    }
 }
 
-/*
- * uart_send_frame():
- *
- * Упаковывает payload в формат [len][payload][crc] и отправляет по UART2.
- *
- * Сейчас есть рабочая реализация через HAL_UART_Transmit().
- * Если потом перейдёшь на DMA TX — адаптируешь.
- */
-void uart_send_frame(const uint8_t* payload, uint16_t len)
-{
-    uint16_t crc = crc16_modbus(payload, len);
 
-    uint8_t header[2];
-    header[0] = (uint8_t)(len & 0xFF);
-    header[1] = (uint8_t)((len >> 8) & 0xFF);
 
-    HAL_UART_Transmit(&huart2, header, 2, 50);
-    HAL_UART_Transmit(&huart2, (uint8_t*)payload, len, 50);
+/* -----------------------------------------
+ * UART TX: отправка кадра
+ * ----------------------------------------- */
+BaseType_t uart_send(const uint8_t *payload, uint16_t len, TickType_t to) {
+    if (!payload || len > FRAME_MAX_PAYLOAD) return pdFALSE;
 
-    uint8_t tail[2];
-    tail[0] = (uint8_t)(crc & 0xFF);
-    tail[1] = (uint8_t)((crc >> 8) & 0xFF);
+    const size_t flen = 2u + len + 2u; // LEN(2) + payload + CRC(2)
 
-    HAL_UART_Transmit(&huart2, tail, 2, 50);
-}
+    // Малые кадры — со стека; крупные — из heap (FreeRTOS).
+    uint8_t small[256];
+    uint8_t *frame = (flen <= sizeof(small)) ? small
+                                             : (uint8_t *) pvPortMalloc(flen);
+    if (!frame) return pdFALSE;
 
-/*
- * handle_frame_from_host():
- *
- * Здесь мы должны:
- * - разобрать CBOR (f->payload, f->len)
- * - прочитать поле "cmd"
- * - выполнить команду
- *   - upload_graph  -> plc_upload_graph()
- *   - activate_graph-> plc_request_activate_graph()
- *   - force_output  -> xQueueSend(plcCmdQueue,...)
- *   - status        -> send_status_reply()
- * - отправить ACK/ответ
- *
- * Пока делаем заглушку (ничего не делаем), чтобы сборка прошла.
- */
-void handle_frame_from_host(const Frame* f)
-{
-    (void)f;
-    // TODO: CBOR parse и вызовы plc_upload_graph(), plc_request_activate_graph(),
-    //       отправка send_*_ack(), постановка PlcCmd в plcCmdQueue.
-}
+    // LEN (little-endian)
+    frame[0] = (uint8_t) (len & 0xFF);
+    frame[1] = (uint8_t) (len >> 8);
 
-/*
- * send_upload_graph_ack(), send_activate_graph_ack(), send_force_output_ack():
- *
- * Эти функции должны сформировать небольшой CBOR или хотя бы простой payload,
- * и отправить через uart_send_frame().
- *
- * Пока делаем минимальные заглушки.
- */
+    // PAYLOAD
+    memcpy(&frame[2], payload, len);
 
-void send_upload_graph_ack(bool ok)
-{
-    uint8_t buf[4];
-    buf[0] = 'U';
-    buf[1] = 'P';
-    buf[2] = ok ? 1 : 0;
-    buf[3] = 0;
-    uart_send_frame(buf, 4);
-}
+    // CRC по payload
+    const uint16_t crc = crc16_modbus(payload, len);
+    frame[2 + len] = (uint8_t) (crc & 0xFF);
+    frame[2 + len + 1] = (uint8_t) (crc >> 8);
 
-void send_activate_graph_ack(bool ok)
-{
-    uint8_t buf[4];
-    buf[0] = 'A';
-    buf[1] = 'C';
-    buf[2] = ok ? 1 : 0;
-    buf[3] = 0;
-    uart_send_frame(buf, 4);
-}
+    BaseType_t ok = UartTx_Send(frame, flen, to);
 
-void send_force_output_ack(bool ok)
-{
-    uint8_t buf[4];
-    buf[0] = 'F';
-    buf[1] = 'O';
-    buf[2] = ok ? 1 : 0;
-    buf[3] = 0;
-    uart_send_frame(buf, 4);
-}
-
-/*
- * send_status_reply():
- *
- * Должно собрать snapshot текущего графа:
- *  - uptimeMs
- *  - cycleMs
- *  - для каждого узла: id, type, out, ton_accum_ms, toff_left_ms и т.д.
- *
- * Потом упаковать в CBOR и отослать.
- *
- * Пока делаем простейшую заглушку.
- */
-void send_status_reply(void)
-{
-    uint8_t buf[16];
-    // простой текстовый ответ "STAT" + аптайм младшие 4 байта
-    uint32_t t = now_ms();
-    buf[0] = 'S';
-    buf[1] = 'T';
-    buf[2] = 'A';
-    buf[3] = 'T';
-    buf[4] = (uint8_t)(t & 0xFF);
-    buf[5] = (uint8_t)((t >> 8) & 0xFF);
-    buf[6] = (uint8_t)((t >> 16) & 0xFF);
-    buf[7] = (uint8_t)((t >> 24) & 0xFF);
-
-    // остальное нулями
-    for (int i = 8; i < 16; i++) buf[i] = 0;
-
-    uart_send_frame(buf, 16);
+    if (frame != small) vPortFree(frame);
+    return ok;
 }

@@ -6,6 +6,7 @@ extern "C" {
 #include <stdint.h>
 #include <stdbool.h>
 #include "plc.h"
+#include "stream_buffer.h"
 
 /*
 * Структура кадра, который мы принимаем из UART.
@@ -19,7 +20,7 @@ extern "C" {
 
 typedef struct {
     uint16_t len;
-    uint8_t  payload[256]; // лимит задаёшь сам
+    uint8_t  payload[556]; // лимит задаёшь сам
 } Frame;
 
 /* CRC16 (MODBUS-style) */
@@ -27,16 +28,17 @@ uint16_t crc16_modbus(const uint8_t* data, uint16_t len);
 
 /* UART низкоуровневые операции */
 bool uart_get_frame_blocking(Frame* out); // ждать 1 полный кадр
-void uart_send_frame(const uint8_t* payload, uint16_t len);
-
+//void uart_send_frame(const uint8_t* payload, uint16_t len);
+BaseType_t uart_send(const uint8_t* payload, uint16_t len, TickType_t to);
 /* Обработка входящего кадра */
-void handle_frame_from_host(const Frame* f);
+//void handle_frame_from_host(const Frame* f);
 
-/* Ответы/ACK, которые уходят хосту */
-void send_upload_graph_ack(bool ok);
-void send_activate_graph_ack(bool ok);
-void send_force_output_ack(bool ok);
-void send_status_reply(void);
+///* Ответы/ACK, которые уходят хосту */
+//void send_upload_graph_ack(bool ok);
+//void send_activate_graph_ack(bool ok);
+//void send_force_output_ack(bool ok);
+//void send_status_reply(void);
+void process_bytes_in_task(const uint8_t* data, size_t n);
 
 
 #ifdef __cplusplus

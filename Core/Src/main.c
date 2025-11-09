@@ -18,15 +18,17 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "rx_to_idle_dma.h"
-#include "plc.h"
-#include "cbor.h"
-#include "FreeRTOS.h"
-#include "task.h"
+#include "usb_device.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
+#include "plc.h"
+#include "cbor.h"
+#include "FreeRTOS.h"
+#include "task.h"
+#include "usbd_cdc_if.h"
+#include "usb_log.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -57,7 +59,6 @@ SPI_HandleTypeDef hspi1;
 TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim4;
 
-UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 DMA_HandleTypeDef hdma_usart2_rx;
 DMA_HandleTypeDef hdma_usart2_tx;
@@ -68,7 +69,7 @@ DMA_HandleTypeDef hdma_usart2_tx;
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
-void StartDefaultTask(void *argument);
+
 static void MX_GPIO_Init(void);
 
 static void MX_DMA_Init(void);
@@ -83,18 +84,15 @@ static void MX_I2C1_Init(void);
 
 static void MX_SPI1_Init(void);
 
-static void MX_USART1_UART_Init(void);
-
 static void MX_TIM1_Init(void);
 
 static void MX_TIM4_Init(void);
 
 /* USER CODE BEGIN PFP */
 static void PLC_InitExampleGraph(void);
-/* CMSIS SysTick interrupt handler prototype */
-extern void SysTick_Handler     (void);
-/* FreeRTOS tick timer interrupt handler prototype */
-extern void xPortSysTickHandler (void);
+
+
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -136,58 +134,24 @@ int main(void) {
     MX_ADC1_Init();
     MX_I2C1_Init();
     MX_SPI1_Init();
-    MX_USART1_UART_Init();
     MX_TIM1_Init();
     MX_TIM4_Init();
+    MX_USB_DEVICE_Init();
     /* USER CODE BEGIN 2 */
-    u2_start();
     // Сформировать тестовый граф ПЛК прямо в g_activeGraph
 //    PLC_InitExampleGraph();
 //
+    u2_start();
 //    // Отметить граф как активный и валидный
 //    g_activeGraphValid  = true;
 //    g_stagingGraphValid = false;
 //    g_needSwapGraph     = false;
 
     // Запустить FreeRTOS (создаст задачи TaskPlcScan и TaskComms и не вернётся)
+    UsbLog_Init();
+    printf("CDC online\r\n");
     init_rtos();
     /* USER CODE END 2 */
-
-    /* Init scheduler */
-//    osKernelInitialize();
-//    defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
-//    osKernelStart();
-    /* USER CODE BEGIN RTOS_MUTEX */
-    /* add mutexes, ... */
-    /* USER CODE END RTOS_MUTEX */
-
-    /* USER CODE BEGIN RTOS_SEMAPHORES */
-    /* add semaphores, ... */
-    /* USER CODE END RTOS_SEMAPHORES */
-
-    /* USER CODE BEGIN RTOS_TIMERS */
-    /* start timers, add new ones, ... */
-    /* USER CODE END RTOS_TIMERS */
-
-    /* USER CODE BEGIN RTOS_QUEUES */
-    /* add queues, ... */
-    /* USER CODE END RTOS_QUEUES */
-
-    /* Create the thread(s) */
-    /* creation of defaultTask */
-    // очередь команд от связи к ПЛК
-
-    /* USER CODE BEGIN RTOS_THREADS */
-    /* add threads, ... */
-    /* USER CODE END RTOS_THREADS */
-
-    /* USER CODE BEGIN RTOS_EVENTS */
-    /* add events, ... */
-    /* USER CODE END RTOS_EVENTS */
-
-    /* Start scheduler */
-
-    /* We should never get here as control is now taken by the scheduler */
 
     /* Infinite loop */
     /* USER CODE BEGIN WHILE */
@@ -215,16 +179,15 @@ void SystemClock_Config(void) {
     /** Initializes the RCC Oscillators according to the specified parameters
     * in the RCC_OscInitTypeDef structure.
     */
-    RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI | RCC_OSCILLATORTYPE_LSI;
-    RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-    RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+    RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_LSI | RCC_OSCILLATORTYPE_HSE;
+    RCC_OscInitStruct.HSEState = RCC_HSE_ON;
     RCC_OscInitStruct.LSIState = RCC_LSI_ON;
     RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-    RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
-    RCC_OscInitStruct.PLL.PLLM = 8;
-    RCC_OscInitStruct.PLL.PLLN = 100;
-    RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
-    RCC_OscInitStruct.PLL.PLLQ = 4;
+    RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+    RCC_OscInitStruct.PLL.PLLM = 25;
+    RCC_OscInitStruct.PLL.PLLN = 384;
+    RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV4;
+    RCC_OscInitStruct.PLL.PLLQ = 8;
     if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) {
         Error_Handler();
     }
@@ -527,37 +490,6 @@ static void MX_TIM4_Init(void) {
 }
 
 /**
-  * @brief USART1 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_USART1_UART_Init(void) {
-
-    /* USER CODE BEGIN USART1_Init 0 */
-
-    /* USER CODE END USART1_Init 0 */
-
-    /* USER CODE BEGIN USART1_Init 1 */
-
-    /* USER CODE END USART1_Init 1 */
-    huart1.Instance = USART1;
-    huart1.Init.BaudRate = 115200;
-    huart1.Init.WordLength = UART_WORDLENGTH_8B;
-    huart1.Init.StopBits = UART_STOPBITS_1;
-    huart1.Init.Parity = UART_PARITY_NONE;
-    huart1.Init.Mode = UART_MODE_TX_RX;
-    huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-    huart1.Init.OverSampling = UART_OVERSAMPLING_16;
-    if (HAL_UART_Init(&huart1) != HAL_OK) {
-        Error_Handler();
-    }
-    /* USER CODE BEGIN USART1_Init 2 */
-
-    /* USER CODE END USART1_Init 2 */
-
-}
-
-/**
   * @brief USART2 Initialization Function
   * @param None
   * @retval None
@@ -666,8 +598,8 @@ static void MX_GPIO_Init(void) {
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-    /*Configure GPIO pins : PA11 PA12 */
-    GPIO_InitStruct.Pin = GPIO_PIN_11 | GPIO_PIN_12;
+    /*Configure GPIO pins : PA9 PA10 */
+    GPIO_InitStruct.Pin = GPIO_PIN_9 | GPIO_PIN_10;
     GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
     GPIO_InitStruct.Pull = GPIO_PULLDOWN;
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
@@ -678,17 +610,10 @@ static void MX_GPIO_Init(void) {
 }
 
 /* USER CODE BEGIN 4 */
-static void TaskBlink(void *arg) {
-    (void) arg;
-    for (;;) {
-        HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
-        vTaskDelay(pdMS_TO_TICKS(500)); // 500 мс
-    }
-}
 
 
-static void PLC_InitExampleGraph(void)
-{
+
+static void PLC_InitExampleGraph(void) {
     // Цель графа:
     //
     // node0: DIGITAL_IN (DI0)
@@ -698,44 +623,44 @@ static void PLC_InitExampleGraph(void)
     // Цикл ПЛК 10 мс.
 
     memset(&g_activeGraph, 0, sizeof(g_activeGraph));
-    g_activeGraph.cycleMs  = 10;
+    g_activeGraph.cycleMs = 10;
     g_activeGraph.nodeCount = 3;
 
     // ---------------- node0: DIGITAL_IN ----------------
-    g_activeGraph.nodes[0].id        = 0;
-    g_activeGraph.nodes[0].type      = PLC_NODE_DIGITAL_IN;
+    g_activeGraph.nodes[0].id = 0;
+    g_activeGraph.nodes[0].type = PLC_NODE_DIGITAL_IN;
     g_activeGraph.nodes[0].valueType = PLC_VAL_BOOL;
-    g_activeGraph.nodes[0].inA       = -1;
-    g_activeGraph.nodes[0].inB       = -1;
-    g_activeGraph.nodes[0].paramInt  = 0;     // логический канал DI0
-    g_activeGraph.nodes[0].paramMs   = 0;
-    g_activeGraph.nodes[0].flags     = 0;
+    g_activeGraph.nodes[0].inA = -1;
+    g_activeGraph.nodes[0].inB = -1;
+    g_activeGraph.nodes[0].paramInt = 0;     // логический канал DI0
+    g_activeGraph.nodes[0].paramMs = 0;
+    g_activeGraph.nodes[0].flags = 0;
     // runtime поля (out, ton_*, force_*) будут обнулены ниже вручную
 
     // ---------------- node1: TON ----------------
-    g_activeGraph.nodes[1].id        = 1;
-    g_activeGraph.nodes[1].type      = PLC_NODE_TON;
+    g_activeGraph.nodes[1].id = 1;
+    g_activeGraph.nodes[1].type = PLC_NODE_TON;
     g_activeGraph.nodes[1].valueType = PLC_VAL_BOOL;
-    g_activeGraph.nodes[1].inA       = 0;     // вход TON берёт node0
-    g_activeGraph.nodes[1].inB       = -1;
-    g_activeGraph.nodes[1].paramInt  = 0;
-    g_activeGraph.nodes[1].paramMs   = 3000;  // задержка 3000 мс
-    g_activeGraph.nodes[1].flags     = 0;
+    g_activeGraph.nodes[1].inA = 0;     // вход TON берёт node0
+    g_activeGraph.nodes[1].inB = -1;
+    g_activeGraph.nodes[1].paramInt = 0;
+    g_activeGraph.nodes[1].paramMs = 3000;  // задержка 3000 мс
+    g_activeGraph.nodes[1].flags = 0;
 
     // ---------------- node2: DIGITAL_OUT ----------------
-    g_activeGraph.nodes[2].id        = 2;
-    g_activeGraph.nodes[2].type      = PLC_NODE_DIGITAL_OUT;
+    g_activeGraph.nodes[2].id = 2;
+    g_activeGraph.nodes[2].type = PLC_NODE_DIGITAL_OUT;
     g_activeGraph.nodes[2].valueType = PLC_VAL_BOOL;
-    g_activeGraph.nodes[2].inA       = 1;     // выход DO = выход TON
-    g_activeGraph.nodes[2].inB       = -1;
-    g_activeGraph.nodes[2].paramInt  = 0;     // логический канал DO0
-    g_activeGraph.nodes[2].paramMs   = 0;
-    g_activeGraph.nodes[2].flags     = 0;
+    g_activeGraph.nodes[2].inA = 1;     // выход DO = выход TON
+    g_activeGraph.nodes[2].inB = -1;
+    g_activeGraph.nodes[2].paramInt = 0;     // логический канал DO0
+    g_activeGraph.nodes[2].paramMs = 0;
+    g_activeGraph.nodes[2].flags = 0;
 
     // Инициализируем рантайм-поля узлов (то же самое делает plc_graph_reset_runtime(),
     // но мы можем сделать локально, чтобы не вызывать её отдельно).
     for (uint16_t i = 0; i < g_activeGraph.nodeCount; i++) {
-        PlcNode* n = &g_activeGraph.nodes[i];
+        PlcNode *n = &g_activeGraph.nodes[i];
         n->out.b = false;
         n->out.i = 0;
         n->out.f = 0.0f;
@@ -743,55 +668,29 @@ static void PLC_InitExampleGraph(void)
         n->sr_q = false;
         n->trig_prev = false;
 
-        n->ton_active   = false;
+        n->ton_active = false;
         n->ton_accum_ms = 0;
 
         n->toff_holding = false;
         n->toff_left_ms = 0;
 
-        n->force_en      = false;
-        n->force_bool    = false;
+        n->force_en = false;
+        n->force_bool = false;
         n->force_left_ms = 0;
     }
 }
 
-void SysTick_Handler(void)
-{   // нужно, если HAL_Delay и HAL тайминги ещё важны
-    xPortSysTickHandler();  // обязательно для FreeRTOS
-}
 
 int _write(int file, char *ptr, int len) {
-    (void) file;
-    HAL_StatusTypeDef st = HAL_UART_Transmit(&huart1, (uint8_t *) ptr, (uint16_t) len, 1000);
-    return (st == HAL_OK) ? len : 0;
+    if (xPortIsInsideInterrupt()) {
+        UsbLog_PutFromISR(ptr, (size_t)len);  // без блокировок
+    } else {
+        UsbLog_Put(ptr, (size_t)len);         // обычный путь
+    }
+    return len;
 }
 
 /* USER CODE END 4 */
-
-/* USER CODE BEGIN Header_StartDefaultTask */
-/**
-  * @brief  Function implementing the defaultTask thread.
-  * @param  argument: Not used
-  * @retval None
-  */
-/* USER CODE END Header_StartDefaultTask */
-void StartDefaultTask(void *argument)
-{
-    /* USER CODE BEGIN 5 */
-    /* Infinite loop */
-    TickType_t lastWake = xTaskGetTickCount();
-    for(;;)
-    {
-
-//        plc_tick();
-
-        uint32_t periodMs =
-                g_activeGraphValid ? g_activeGraph.cycleMs : 10u;
-        HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_4);
-        vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(periodMs));
-    }
-    /* USER CODE END 5 */
-}
 
 /**
   * @brief  Period elapsed callback in non blocking mode

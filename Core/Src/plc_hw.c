@@ -64,7 +64,7 @@ typedef struct {
    DI1 -> PA1 (инверсный)
 */
 static const HwDiscreteInMap hw_di[] = {
-        { GPIOA, GPIO_PIN_11, false },  // DI0
+        { GPIOA, GPIO_PIN_10, false },  // DI0
         { GPIOA, GPIO_PIN_1, false  },  // DI1
 };
 
