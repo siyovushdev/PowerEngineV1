@@ -31,7 +31,7 @@ void init_rtos(void)
     s_txDone = xSemaphoreCreateBinary();
     configASSERT(g_uartRxStream != NULL);
 
-    xTaskCreate(TaskPlcScan, "PLC",   512, NULL, tskIDLE_PRIORITY+3, NULL);
+    xTaskCreate(TaskPlcScan, "PLC",   1024, NULL, tskIDLE_PRIORITY+3, NULL);
     xTaskCreate(TaskComms,   "COMMS", 768, NULL, tskIDLE_PRIORITY+2, NULL);
     xTaskCreate(UartTx_Task, "uart_tx", 256, NULL, tskIDLE_PRIORITY+2, NULL);
 

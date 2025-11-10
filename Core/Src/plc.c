@@ -1,4 +1,5 @@
 #include "plc.h"
+#include "logf.h"
 #include <string.h> // memcpy
 
 PlcGraph g_activeGraph;
@@ -9,8 +10,6 @@ bool g_stagingGraphValid = false;
 volatile bool g_needSwapGraph = false;
 
 QueueHandle_t plcCmdQueue = NULL;
-
-#define LOGF_PLC(fmt, ...)  printf("CBOR %s:%d " fmt "\r\n", __FUNCTION__, __LINE__, ##__VA_ARGS__)
 
 typedef struct {
     bool     stable;         // стабилизированное состояние, которое отдаём наружу
@@ -51,39 +50,198 @@ void plc_graph_reset_runtime(PlcGraph *g) {
 }
 
 bool plc_validate_graph(PlcGraph *g) {
-    if (g->nodeCount == 0) return false;
-    if (g->nodeCount > PLC_MAX_NODES) return false;
+    if (g->nodeCount == 0) {
+        LOGT("PLC","g->nodeCount == 0. Return false");
+        return false;
+    }
+    if (g->nodeCount > PLC_MAX_NODES) {
+        LOGT("PLC","g->nodeCount > PLC_MAX_NODES. Return false");
+        return false;
+    }
 
+    // Нормализация периода цикла
     if (g->cycleMs < PLC_CYCLE_MS_MIN) g->cycleMs = PLC_CYCLE_MS_MIN;
     if (g->cycleMs > PLC_CYCLE_MS_MAX) g->cycleMs = PLC_CYCLE_MS_MAX;
 
     for (uint16_t i = 0; i < g->nodeCount; i++) {
         PlcNode *n = &g->nodes[i];
 
-        if (n->id != i) return false;
-        if (n->type > PLC_NODE_PWM_OUT) return false;
-        if (n->valueType > PLC_VAL_FLOAT) return false;
-
-        if (n->inA >= 0 && n->inA >= (int16_t) i) return false;
-        if (n->inB >= 0 && n->inB >= (int16_t) i) return false;
-
-        if (n->type == PLC_NODE_DIGITAL_IN && (n->inA != -1 || n->inB != -1)) return false;
-        if (n->type == PLC_NODE_AI_IN && (n->inA != -1 || n->inB != -1)) return false;
-
-        if (n->type == PLC_NODE_DIGITAL_OUT && (n->inA < 0)) return false;
-        if (n->type == PLC_NODE_TON && (n->inA < 0)) return false;
-        if (n->type == PLC_NODE_TOFF && (n->inA < 0)) return false;
-        if (n->type == PLC_NODE_PWM_OUT && (n->inA < 0)) return false;
-
-        if ((n->type == PLC_NODE_TON || n->type == PLC_NODE_TOFF) &&
-            (n->paramMs > 600000u)) // 10 мин защита
-        {
+        // --- 1. Проверка id ---
+        if (n->id != i) {
+            LOGT("PLC","id mismatch: node[%u].id=%d != %u", i, (int)n->id, i);
             return false;
+        }
+
+        // --- 2. Проверка типа ---
+        if (n->type > PLC_NODE_LIMIT) {
+            LOGT("PLC","node[%u] type=%u > PLC_NODE_LIMIT", i, (unsigned)n->type);
+            return false;
+        }
+
+        // --- 3. Ацикличность: inA/inB должны ссылаться только на узлы с меньшим индексом ---
+        if (n->inA >= 0 && (uint16_t)n->inA >= i) {
+            LOGT("PLC","node[%u] inA=%d >= %u", i, (int)n->inA, i);
+            return false;
+        }
+        if (n->inB >= 0 && (uint16_t)n->inB >= i) {
+            LOGT("PLC","node[%u] inB=%d >= %u", i, (int)n->inB, i);
+            return false;
+        }
+
+
+        // --- 4. Проверка входов в зависимости от типа ---
+        switch (n->type) {
+
+            // Источники — не должны иметь входов
+            case PLC_NODE_CONST_BOOL:
+            case PLC_NODE_CONST_INT:
+            case PLC_NODE_DIGITAL_IN:
+            case PLC_NODE_AI_IN:
+                if (n->inA != -1 || n->inB != -1) {
+                    LOGT("PLC","node[%u] source type=%u must have inA=inB=-1", i, (unsigned)n->type);
+                    return false;
+                }
+                break;
+
+                // Узлы, требующие один вход
+            case PLC_NODE_NOT:
+            case PLC_NODE_DIGITAL_OUT:
+            case PLC_NODE_TON:
+            case PLC_NODE_TOFF:
+            case PLC_NODE_R_TRIG:
+            case PLC_NODE_F_TRIG:
+            case PLC_NODE_PWM_OUT:
+            case PLC_NODE_COMPARE_GT:
+            case PLC_NODE_COMPARE_LT:
+                if (n->inA < 0) {
+                    LOGT("PLC","node[%u] type=%u requires inA>=0", i, (unsigned)n->type);
+                    return false;
+                }
+                break;
+
+                // Узлы, требующие два входа
+            case PLC_NODE_AND2:
+            case PLC_NODE_OR2:
+                if (n->inA < 0 || n->inB < 0) {
+                    LOGT("PLC","node[%u] type=%u requires inA>=0 and inB>=0", i, (unsigned)n->type);
+                    return false;
+                }
+                break;
+
+                // SR latch: хотя бы один вход должен быть
+            case PLC_NODE_SR:
+                if (n->inA < 0 && n->inB < 0) {
+                    LOGT("PLC","node[%u] SR requires at least one input", i);
+                    return false;
+                }
+                break;
+
+                // MUX2: оба входа данных и селектор в paramInt
+            case PLC_NODE_MUX2:
+                if (n->inA < 0 || n->inB < 0) {
+                    LOGT("PLC","node[%u] MUX2 requires inA>=0 and inB>=0", i);
+                    return false;
+                }
+                if (n->paramInt < 0 || (uint16_t)n->paramInt >= i) {
+                    LOGT("PLC","node[%u] MUX2 selector paramInt=%d invalid (< %u)", i, (int)n->paramInt, i);
+                    return false;
+                }
+                break;
+            case PLC_NODE_TP:
+                // Требует один вход (inA)
+                if (n->inA < 0) {
+                    LOGT("PLC","node[%u] TP requires inA>=0", i);
+                    return false;
+                }
+                if (n->paramMs > 600000u) { // 10 мин
+                    LOGT("PLC","node[%u] TP paramMs too large", i);
+                    return false;
+                }
+                break;
+
+            case PLC_NODE_HYST:
+                // Один вход (float). Порог и ширина из параметров.
+                if (n->inA < 0) {
+                    LOGT("PLC","node[%u] HYST requires inA>=0", i);
+                    return false;
+                }
+                // paramInt может быть отрицат. не делаем жёсткой проверки: возьмём |h|
+                break;
+
+            case PLC_NODE_SCALE:
+                if (n->inA < 0) {
+                    LOGT("PLC","node[%u] SCALE requires inA>=0", i);
+                    return false;
+                }
+                break;
+
+            case PLC_NODE_ADD:
+                if (n->inA < 0 || n->inB < 0) {
+                    LOGT("PLC","node[%u] ADD requires inA>=0 and inB>=0", i);
+                    return false;
+                }
+                break;
+
+            case PLC_NODE_LIMIT:
+                if (n->inA < 0) {
+                    LOGT("PLC","node[%u] LIMIT requires inA>=0", i);
+                    return false;
+                }
+                // min/max в тысячных вмещаются в int/uint, без доп. проверок
+                break;
+
+            default:
+                break;
+        }
+
+        // --- 5. Проверка параметров таймеров ---
+        if ((n->type == PLC_NODE_TON || n->type == PLC_NODE_TOFF) &&
+            n->paramMs > 600000u) { // 10 мин
+            LOGT("PLC","node[%u] timer paramMs=%u > 600000", i, (unsigned)n->paramMs);
+            return false;
+        }
+
+        // --- 6. Проверка valueType (только предупреждения) ---
+        if ((n->type == PLC_NODE_DIGITAL_IN || n->type == PLC_NODE_AND2 ||
+             n->type == PLC_NODE_OR2 || n->type == PLC_NODE_NOT ||
+             n->type == PLC_NODE_SR || n->type == PLC_NODE_TON ||
+             n->type == PLC_NODE_TOFF || n->type == PLC_NODE_R_TRIG ||
+             n->type == PLC_NODE_F_TRIG || n->type == PLC_NODE_DIGITAL_OUT) &&
+            n->valueType != PLC_VAL_BOOL) {
+            LOGT("PLC","node[%u] type=%u normally outputs BOOL, but valueType=%u", i, (unsigned)n->type, (unsigned)n->valueType);
+        }
+
+        if ((n->type == PLC_NODE_CONST_INT) && n->valueType != PLC_VAL_INT) {
+            LOGT("PLC","node[%u] CONST_INT should have valueType=INT, now=%u", i, (unsigned)n->valueType);
+        }
+
+        if ((n->type == PLC_NODE_AI_IN || n->type == PLC_NODE_PWM_OUT || n->type == PLC_NODE_MUX2) &&
+            n->valueType != PLC_VAL_FLOAT) {
+            LOGT("PLC","node[%u] type=%u normally outputs FLOAT, but valueType=%u", i, (unsigned)n->type, (unsigned)n->valueType);
+        }
+
+        if (n->type == PLC_NODE_TP || n->type == PLC_NODE_HYST) {
+            if (n->valueType != PLC_VAL_BOOL) {
+                LOGT("PLC","node[%u] type=%u normally outputs BOOL, but valueType=%u", i, (unsigned)n->type, (unsigned)n->valueType);
+            }
+        }
+        if (n->type == PLC_NODE_SCALE || n->type == PLC_NODE_ADD || n->type == PLC_NODE_LIMIT) {
+            if (n->valueType != PLC_VAL_FLOAT) {
+                LOGT("PLC","node[%u] type=%u normally outputs FLOAT, but valueType=%u", i, (unsigned)n->type, (unsigned)n->valueType);
+            }
+        }
+
+        // --- 7. Проверка hw индексов ---
+        if ((n->type == PLC_NODE_DIGITAL_IN || n->type == PLC_NODE_DIGITAL_OUT ||
+             n->type == PLC_NODE_AI_IN || n->type == PLC_NODE_PWM_OUT) &&
+            n->paramInt < 0) {
+            LOGT("PLC","node[%u] type=%u uses paramInt as HW index, but paramInt<0", i, (unsigned)n->type);
         }
     }
 
     return true;
 }
+
 
 /* ================== API для TaskComms ================== */
 
@@ -92,15 +250,15 @@ bool plc_upload_graph(const PlcGraph *src) {
     g_stagingGraph = *src;
 
     if (!plc_validate_graph(&g_stagingGraph)) {
-        LOGF_PLC("Graph is not valid!");
+        LOGT("PLC","Graph is not valid!");
         g_stagingGraphValid = false;
         return false;
     }
 
-    LOGF_PLC("Graph is valid!");
+    LOGT("PLC","Graph is valid!");
 
     plc_graph_reset_runtime(&g_stagingGraph);
-    LOGF_PLC("plc_graph_reset_runtime!");
+    LOGT("PLC","plc_graph_reset_runtime!");
 
     g_stagingGraphValid = true;
     //Временно для теста включим, а так это командой активации включить!
@@ -309,7 +467,7 @@ void plc_graph_step(PlcGraph *g, uint32_t dt_ms) {
                     } else {
                         if (self->ton_accum_ms < self->paramMs) {
                             self->ton_accum_ms += dt_ms;
-                            LOGF_PLC("self->ton_accum_ms->%lu", self->ton_accum_ms);
+                            LOGT("PLC","self->ton_accum_ms->%lu", self->ton_accum_ms);
                             if (self->ton_accum_ms > self->paramMs)
                                 self->ton_accum_ms = self->paramMs;
                         }
@@ -398,6 +556,104 @@ void plc_graph_step(PlcGraph *g, uint32_t dt_ms) {
 
                 self->out.i = duty;
                 self->out.f = (float) duty;
+                break;
+            }
+            case PLC_NODE_MUX2: {
+                // Источник селектора: paramInt = индекс узла, дающего bool (0/1).
+                const PlcNode* s = (self->paramInt >= 0) ? &g->nodes[self->paramInt] : NULL;
+                bool  sel = s ? get_bool(s) : false;
+
+                float va = a ? get_float(a) : 0.0f;  // inA — «ветка 1»
+                float vb = b ? get_float(b) : 0.0f;  // inB — «ветка 0»
+
+                float y = sel ? va : vb;
+
+                // Основной тип у MUX2 — float (универсально). Дублируем в .i/.b для удобства.
+                self->out.f = y;
+                self->out.i = (int32_t)y;
+                self->out.b = (y != 0.0f);
+                break;
+            }
+            case PLC_NODE_TP: {
+                bool a_now   = a ? get_bool(a) : false;
+                bool rising  = (a_now && !self->trig_prev);
+                self->trig_prev = a_now;
+
+                // 1) На фронте — стартуем окно и ГАРАНТИРОВАННО даём 1 тик 'true'
+                if (rising) {
+                    self->toff_holding = true;
+                    self->toff_left_ms = self->paramMs;
+                }
+
+                // Снимок до декремента — то, что выдадим в этом цикле
+                bool pulse = self->toff_holding;
+
+                // 2) После определения 'pulse' — обслуживаем таймер
+                if (self->toff_holding) {
+                    // (опционально) защита от слишком большого dt
+                    uint32_t step = dt_ms;
+                    if (step > self->toff_left_ms) step = self->toff_left_ms;
+
+                    if (step >= self->toff_left_ms) {
+                        self->toff_left_ms = 0;
+                        self->toff_holding = false;
+                    } else {
+                        self->toff_left_ms -= step;
+                    }
+                }
+
+                self->out.b = pulse;
+//                self->out.i = pulse ? 1 : 0;
+//                self->out.f = pulse ? 1.0f : 0.0f;
+                break;
+            }
+
+            case PLC_NODE_HYST: {
+                float x = a ? get_float(a) : 0.0f;
+                float center = self->paramFloat;
+                float h = (float)self->paramInt * 0.001f; // тысячные
+                if (h < 0.0f) h = -h;
+                float hi = center + 0.5f*h;
+                float lo = center - 0.5f*h;
+
+                bool y = self->sr_q;     // текущее состояние
+                if (x >= hi)      y = true;
+                else if (x <= lo) y = false;
+
+                self->sr_q = y;
+                self->out.b = y;
+//                self->out.i = y ? 1 : 0;
+//                self->out.f = y ? 1.0f : 0.0f;
+                break;
+            }
+            case PLC_NODE_SCALE: {
+                float x = a ? get_float(a) : 0.0f;
+                float A = self->paramFloat;
+                float B = (float)self->paramInt * 0.001f;
+                float y = A * x + B;
+                self->out.f = y;
+                self->out.i = (int32_t)y;
+                self->out.b = (y != 0.0f);
+                break;
+            }
+            case PLC_NODE_ADD: {
+                float va = a ? get_float(a) : 0.0f;
+                float vb = b ? get_float(b) : 0.0f;
+                float y = va + vb;
+                self->out.f = y;
+                self->out.i = (int32_t)y;
+                self->out.b = (y != 0.0f);
+                break;
+            }
+            case PLC_NODE_LIMIT: {
+                float x  = a ? get_float(a) : 0.0f;
+                float mn = (float)self->paramInt * 0.001f;
+                float mx = (float)self->paramMs  * 0.001f;
+                if (mn > mx) { float t = mn; mn = mx; mx = t; }
+                float y = (x < mn) ? mn : (x > mx ? mx : x);
+                self->out.f = y;
+                self->out.i = (int32_t)y;
+                self->out.b = (y != 0.0f);
                 break;
             }
 

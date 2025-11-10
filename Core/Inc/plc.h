@@ -37,7 +37,14 @@ typedef enum {
     PLC_NODE_AI_IN      = 12, // Аналоговый вход (чтение АЦП, датчиков, потенциометров)
     PLC_NODE_COMPARE_GT = 13, // Сравнение "БОЛЬШЕ" (A > B)
     PLC_NODE_COMPARE_LT = 14, // Сравнение "МЕНЬШЕ" (A < B)
-    PLC_NODE_PWM_OUT    = 15  // ШИМ-выход (PWM): формирование аналогового сигнала по коэффициенту заполнения
+    PLC_NODE_PWM_OUT    = 15,  // ШИМ-выход (PWM): формирование аналогового сигнала по коэффициенту заполнения
+    PLC_NODE_MUX2       = 16,   // селектор: out = sel ? inA : inB; sel берём из node[paramInt]
+    PLC_NODE_TP         = 17, // одноимпульсный таймер: фронт inA -> импульс paramMs
+    PLC_NODE_HYST       = 18, // гистерезис: inA(float)->bool; центр=paramFloat; ширина=paramInt/1000
+    PLC_NODE_SCALE      = 19, // y=a*x+b; a=paramFloat; b=paramInt/1000
+    PLC_NODE_ADD        = 20, // out = inA + inB (float)
+    PLC_NODE_LIMIT      = 21,  // clamp: min=paramInt/1000; max=paramMs/1000
+
 } PlcNodeType;
 
 

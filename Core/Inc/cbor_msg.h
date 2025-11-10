@@ -11,7 +11,7 @@
 #include <string.h>
 
 #ifndef CBOR_MAX_REPLY
-#define CBOR_MAX_REPLY 256
+#define CBOR_MAX_REPLY 512u
 #endif
 
 typedef struct {

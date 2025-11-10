@@ -1,8 +1,11 @@
 #include "cbor_msg.h"
+#include "plc_persist.h"
+#include "logf.h"
 
+static const char *tag = "CBOR";
 
-#define LOGF(fmt, ...)  printf("CBOR %s:%d " fmt "\r\n", __FUNCTION__, __LINE__, ##__VA_ARGS__)
-
+//#define LOGF(fmt, ...)  printf("CBOR %s:%d " fmt "\r\n", __FUNCTION__, __LINE__, ##__VA_ARGS__)
+bool decode_graph_from_cbor(const uint8_t* buf, size_t len, PlcGraph* outG);
 static const char *cbor_type_name(CborType t) {
     switch (t) {
         case CborIntegerType:
@@ -140,7 +143,7 @@ void send_status_reply(CborReply *out)
     // закрыть корневую map
     if(!_ok(cbor_encoder_close_container(&root, &map))) goto send;
 
-    send: ;
+    send:
     out->len = (uint16_t)cbor_encoder_get_buffer_size(&root, out->data);
 }
 
@@ -295,7 +298,7 @@ static CborError decode_single_node(CborValue *nodeMapIt, PlcNode *outNode) {
     outNode->flags = 0;
 
     if (!cbor_value_is_map(nodeMapIt)) {
-        LOGF("node is not map, type=%s", cbor_type_name(cbor_value_get_type(nodeMapIt)));
+        LOGT(tag, "node is not map, type=%s", cbor_type_name(cbor_value_get_type(nodeMapIt)));
         return CborErrorIllegalType;
     }
 
@@ -303,121 +306,121 @@ static CborError decode_single_node(CborValue *nodeMapIt, PlcNode *outNode) {
 
     // id
     if (map_find(nodeMapIt, "id", &val)) {
-        LOGF("id type=%s", cbor_type_name(cbor_value_get_type(&val)));
+        LOGT(tag, "id type=%s", cbor_type_name(cbor_value_get_type(&val)));
         int32_t tmp;
         if (!get_int32(&val, &tmp)) {
-            LOGF("id parse error");
+            LOGT(tag, "id parse error");
             return CborErrorIllegalType;
         }
         outNode->id = tmp;
     } else {
-        LOGF("id not present");
+        LOGT(tag, "id not present");
     }
 
 
     // type
     if (map_find(nodeMapIt, "type", &val)) {
-        LOGF("type type=%s", cbor_type_name(cbor_value_get_type(&val)));
+        LOGT(tag, "type type=%s", cbor_type_name(cbor_value_get_type(&val)));
         int32_t tmp;
         if (!get_int32(&val, &tmp)) {
-            LOGF("type parse error");
+            LOGT(tag, "type parse error");
             return CborErrorIllegalType;
         }
         outNode->type = tmp;
     } else {
-        LOGF("type not present");
+        LOGT(tag, "type not present");
     }
 
     // valueType
     if (map_find(nodeMapIt, "valueType", &val)) {
-        LOGF("valueType type=%s", cbor_type_name(cbor_value_get_type(&val)));
+        LOGT(tag, "valueType type=%s", cbor_type_name(cbor_value_get_type(&val)));
         int32_t tmp;
         if (!get_int32(&val, &tmp)) {
-            LOGF("valueType parse error");
+            LOGT(tag, "valueType parse error");
             return CborErrorIllegalType;
         }
         outNode->valueType = tmp;
     } else {
-        LOGF("valueType not present");
+        LOGT(tag, "valueType not present");
     }
 
     // inA
     if (map_find(nodeMapIt, "inA", &val)) {
-        LOGF("inA type=%s", cbor_type_name(cbor_value_get_type(&val)));
+        LOGT(tag, "inA type=%s", cbor_type_name(cbor_value_get_type(&val)));
         int32_t tmp;
         if (!get_int32(&val, &tmp)) {
-            LOGF("inA parse error");
+            LOGT(tag, "inA parse error");
             return CborErrorIllegalType;
         }
         outNode->inA = (int16_t) tmp;
     } else {
-        LOGF("inA not present");
+        LOGT(tag, "inA not present");
     }
 
     // inB
     if (map_find(nodeMapIt, "inB", &val)) {
-        LOGF("inB type=%s", cbor_type_name(cbor_value_get_type(&val)));
+        LOGT(tag, "inB type=%s", cbor_type_name(cbor_value_get_type(&val)));
         int32_t tmp;
         if (!get_int32(&val, &tmp)) {
-            LOGF("inB parse error");
+            LOGT(tag, "inB parse error");
             return CborErrorIllegalType;
         }
         outNode->inB = (int16_t) tmp;
     } else {
-        LOGF("inB not present");
+        LOGT(tag, "inB not present");
     }
 
     // paramInt
     if (map_find(nodeMapIt, "paramInt", &val)) {
-        LOGF("paramInt type=%s", cbor_type_name(cbor_value_get_type(&val)));
+        LOGT(tag, "paramInt type=%s", cbor_type_name(cbor_value_get_type(&val)));
         int32_t tmp;
         if (!get_int32(&val, &tmp)) {
-            LOGF("paramInt parse error");
+            LOGT(tag, "paramInt parse error");
             return CborErrorIllegalType;
         }
         outNode->paramInt =  tmp;
     } else {
-        LOGF("paramInt not present");
+        LOGT(tag, "paramInt not present");
     }
 
     // paramFloat
     if (map_find(nodeMapIt, "paramFloat", &val)) {
-        LOGF("paramFloat type=%s", cbor_type_name(cbor_value_get_type(&val)));
+        LOGT(tag, "paramFloat type=%s", cbor_type_name(cbor_value_get_type(&val)));
         float tmpf;
         if (!get_float_any(&val, &tmpf)) {
-            LOGF("paramFloat parse error");
+            LOGT(tag, "paramFloat parse error");
             return CborErrorIllegalType;
         }
-        LOGF("paramFloat=%.6f", tmpf);
+        LOGT(tag, "paramFloat=%.6f", tmpf);
         outNode->paramFloat = tmpf;
     } else {
-        LOGF("paramFloat not present");
+        LOGT(tag, "paramFloat not present");
     }
 
     // paramMs
     if (map_find(nodeMapIt, "paramMs", &val)) {
-        LOGF("paramMs type=%s", cbor_type_name(cbor_value_get_type(&val)));
+        LOGT(tag, "paramMs type=%s", cbor_type_name(cbor_value_get_type(&val)));
         uint32_t tmpu;
         if (!get_uint32(&val, &tmpu)) {
-            LOGF("paramMs parse error");
+            LOGT(tag, "paramMs parse error");
             return CborErrorIllegalType;
         }
         outNode->paramMs = tmpu;
     } else {
-        LOGF("paramMs not present");
+        LOGT(tag, "paramMs not present");
     }
 
     // flags
     if (map_find(nodeMapIt, "flags", &val)) {
-        LOGF("flags type=%s", cbor_type_name(cbor_value_get_type(&val)));
+        LOGT(tag, "flags type=%s", cbor_type_name(cbor_value_get_type(&val)));
         uint32_t tmpu;
         if (!get_uint32(&val, &tmpu)) {
-            LOGF("flags parse error");
+            LOGT(tag, "flags parse error");
             return CborErrorIllegalType;
         }
         outNode->flags = tmpu;
     } else {
-        LOGF("flags not present");
+        LOGT(tag, "flags not present");
     }
 
     return CborNoError;
@@ -425,7 +428,7 @@ static CborError decode_single_node(CborValue *nodeMapIt, PlcNode *outNode) {
 
 static CborError decode_graph(CborValue *graphMapIt, PlcGraph *outGraph) {
     if (!cbor_value_is_map(graphMapIt)) {
-        LOGF("graph is not map, type=%s", cbor_type_name(cbor_value_get_type(graphMapIt)));
+        LOGT(tag, "graph is not map, type=%s", cbor_type_name(cbor_value_get_type(graphMapIt)));
         return CborErrorIllegalType;
     }
 
@@ -437,29 +440,29 @@ static CborError decode_graph(CborValue *graphMapIt, PlcGraph *outGraph) {
 
     // cycleMs
     if (map_find(graphMapIt, "cycleMs", &val)) {
-        LOGF("cycleMs type=%s", cbor_type_name(cbor_value_get_type(&val)));
+        LOGT(tag, "cycleMs type=%s", cbor_type_name(cbor_value_get_type(&val)));
         uint32_t cyc;
         if (!get_uint32(&val, &cyc)) {
-            LOGF("cycleMs parse error");
+            LOGT(tag, "cycleMs parse error");
             return CborErrorIllegalType;
         }
         outGraph->cycleMs = cyc;
     } else {
-        LOGF("cycleMs not present");
+        LOGT(tag, "cycleMs not present");
     }
 
     // nodes[]
 
     if (!map_find(graphMapIt, "nodes", &val)) {
-        LOGF("nodes missing");
+        LOGT(tag, "nodes missing");
         return CborErrorUnknownType;
     }
     if (!cbor_value_is_array(&val)) {
-        LOGF("nodes is not array, type=%s", cbor_type_name(cbor_value_get_type(&val)));
+        LOGT(tag, "nodes is not array, type=%s", cbor_type_name(cbor_value_get_type(&val)));
         return CborErrorIllegalType;
     }
 
-    LOGF("enter nodes array");
+    LOGT(tag, "enter nodes array");
 
     // Итерируем массив узлов
     CborValue arrIt;
@@ -469,25 +472,25 @@ static CborError decode_graph(CborValue *graphMapIt, PlcGraph *outGraph) {
     uint16_t count = 0;
     while (!cbor_value_at_end(&arrIt)) {
         if (count >= PLC_MAX_NODES) {
-            LOGF("CborErrorOutOfMemory");
+            LOGT(tag, "CborErrorOutOfMemory");
             return CborErrorOutOfMemory; // слишком много узлов
         }
 
         if (!cbor_value_is_map(&arrIt)) {
-            LOGF("arrIt is not map, type=%s", cbor_type_name(cbor_value_get_type(&arrIt)));
+            LOGT(tag, "arrIt is not map, type=%s", cbor_type_name(cbor_value_get_type(&arrIt)));
             return CborErrorIllegalType;
         }
 
         err = decode_single_node(&arrIt, &outGraph->nodes[count]);
         if (err != CborNoError) {
-            LOGF("CborError -> decode_single_node");
+            LOGT(tag, "CborError -> decode_single_node");
             return err;
         }
 
         // перешагиваем к следующему элементу массива
         err = cbor_value_advance(&arrIt);
         if (err != CborNoError) {
-            LOGF("CborError -> cbor_value_advance");
+            LOGT(tag, "CborError -> cbor_value_advance");
             return err;
         }
 
@@ -526,6 +529,24 @@ bool parse_cmd_upload_graph(CborValue root) {
 //    g_needSwapGraph = true;
 
     return true;
+}
+
+bool decode_graph_from_cbor(const uint8_t* buf, size_t len, PlcGraph* outG){
+    CborParser parser;
+    CborValue root;
+    CborError err;
+
+    err = cbor_parser_init(buf, len, 0, &parser, &root);
+    if (err != CborNoError) {
+        return false;
+    }
+
+    // Ждём корневую map
+    if (!cbor_value_is_map(&root)) {
+        return false;
+    }
+
+    return decode_graph(&root, outG) == CborNoError;
 }
 
 /* Точка входа из транспорта */
@@ -571,8 +592,19 @@ void on_cbor_frame_received(const uint8_t *buf, size_t len, CborReply* out) {
     }
 
     if (strcmp(cmdBuf, "status") == 0) {
-        bool ok = plc_request_activate_graph();
         send_status_reply(out);
+    }
+
+    if (strcmp(cmdBuf, "save_active") == 0) {
+        bool ok = plc_persist_save_active();
+        send_simple_ack("save_active_ack", ok, out);
+        return;
+    }
+
+    if (strcmp(cmdBuf, "load_active") == 0) {
+        bool ok = plc_persist_load_active();
+        send_simple_ack("load_active_ack", ok, out);
+        return;
     }
 
 }

@@ -29,6 +29,9 @@
 #include "task.h"
 #include "usbd_cdc_if.h"
 #include "usb_log.h"
+#include "plc_persist.h"
+#include "uart2_cmd_handler.h"
+#include "logf.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -149,7 +152,23 @@ int main(void) {
 
     // Запустить FreeRTOS (создаст задачи TaskPlcScan и TaskComms и не вернётся)
     UsbLog_Init();
-    printf("CDC online\r\n");
+    logf_set_level(LOG_LEVEL_DEBUG); // показывать всё
+    logf_set_enabled(true);          // включить логи
+
+    LOGI("Init done, ver=%u", 1u);
+    LOGD("Debug details x=%ld", (long)123);
+
+    if (!plc_persist_load_active()){
+        // если ничего нет — твой тестовый:
+        LOGD("plc_persist_load_active false\r\n");
+//        PLC_InitExampleGraph();
+//        g_activeGraphValid  = true;
+//        g_stagingGraphValid = false;
+//        g_needSwapGraph     = false;
+    }else{
+        LOGD("plc_persist_load_active true\r\n");
+    }
+
     init_rtos();
     /* USER CODE END 2 */
 
