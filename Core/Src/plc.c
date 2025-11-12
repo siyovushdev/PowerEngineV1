@@ -153,7 +153,7 @@ bool plc_validate_graph(PlcGraph *g) {
         }
 
         // --- 2. Проверка типа ---
-        if (n->type > PLC_NODE_PID) {
+        if (n->type > PLC_NODE_RAMP) {
             LOGT("PLC","node[%u] type=%u > PLC_NODE_LIMIT", i, (unsigned)n->type);
             return false;
         }
@@ -279,6 +279,22 @@ bool plc_validate_graph(PlcGraph *g) {
                 if (n->paramInt < 0 || n->paramMs < 0) {
                     LOGT("PLC","node[%u] PID Ki/Kd must be >= 0 (paramInt>=0, paramMs>=0)", i);
                     return false;
+                }
+                break;
+
+            case PLC_NODE_ANALOG_AVG:
+                if (n->inA < 0) { LOGT("PLC","node[%u] ANALOG_AVG requires inA>=0", i); return false; }
+                // 0 <= alpha <= 1 → paramInt 0..1000
+                if (n->paramInt < 0 || n->paramInt > 1000) {
+                    LOGT("PLC","node[%u] ANALOG_AVG alpha (paramInt) must be 0..1000", i); return false;
+                }
+                break;
+
+            case PLC_NODE_RAMP:
+                if (n->inA < 0) { LOGT("PLC","node[%u] RAMP requires inA>=0", i); return false; }
+                // rate >= 0 (единиц в секунду), задаётся в тысячных
+                if (n->paramInt < 0) {
+                    LOGT("PLC","node[%u] RAMP rate (paramInt) must be >=0", i); return false;
                 }
                 break;
 
@@ -950,6 +966,32 @@ void plc_graph_step(PlcGraph *g, uint32_t dt_ms) {
 
                 // Выход
                 self->out.i = (int32_t)u;
+                break;
+            }
+
+            case PLC_NODE_ANALOG_AVG: {
+                float x = a ? get_float(a) : 0.0f;
+                float alpha = (float)self->paramInt * 0.001f; // 0..1
+                if (!self->filt_inited) { self->filt_prev = x; self->filt_inited = true; }
+                float y = self->filt_prev + alpha * (x - self->filt_prev);
+                self->filt_prev = y;
+                self->out.f = y;
+                break;
+            }
+            case PLC_NODE_RAMP: {
+                float x = a ? get_float(a) : 0.0f;
+                float rate = (float)self->paramInt * 0.001f; // ед/с
+                float Ts = (dt_ms > 0) ? (0.001f * dt_ms) : 0.001f;
+                float max_delta = rate * Ts; // допустимое изменение за шаг
+
+                if (!self->ramp_inited) { self->ramp_prev = x; self->ramp_inited = true; }
+                float delta = x - self->ramp_prev;
+                if (delta >  max_delta) delta =  max_delta;
+                if (delta < -max_delta) delta = -max_delta;
+
+                float y = self->ramp_prev + delta;
+                self->ramp_prev = y;
+                self->out.f = y;
                 break;
             }
 

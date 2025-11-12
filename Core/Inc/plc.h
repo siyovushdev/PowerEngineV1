@@ -47,7 +47,10 @@ typedef enum {
     PLC_NODE_SCALE      = 19, // y=a*x+b; a=paramFloat; b=paramInt/1000
     PLC_NODE_ADD        = 20, // out = inA + inB (float)
     PLC_NODE_LIMIT      = 21,  // clamp: min=paramInt/1000; max=paramMs/1000
-    PLC_NODE_PID        = 22
+    PLC_NODE_PID        = 22,
+    PLC_NODE_ANALOG_AVG = 23,  // сглаживание: y += alpha*(x - y); alpha = paramInt/1000
+    PLC_NODE_RAMP       = 24   // ограничение скорости: |y - prev| <= rate*dt; rate = paramInt/1000 ед/с
+
 
 } PlcNodeType;
 
@@ -112,6 +115,12 @@ typedef struct {
     float    pid_i;          // интегральная составляющая
     float    pid_prev_meas;  // предыдущее PV для d(PV)/dt
     bool     pid_inited;     // флаг инициализации
+
+    // для обоих узлов достаточно одного буфера предыдущего значения
+    float  filt_prev;     // для ANALOG_AVG: предыдущее y
+    bool   filt_inited;   // инициализация фильтра
+    float  ramp_prev;     // для RAMP: предыдущий выход
+    bool   ramp_inited;
 } PlcNode;
 
 typedef struct {
