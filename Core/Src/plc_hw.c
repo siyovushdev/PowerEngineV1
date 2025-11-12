@@ -82,8 +82,8 @@ static const HwDiscreteOutMap hw_do[] = {
    AI1 -> ADC1 CH2
 */
 static const HwAnalogInMap hw_ai[] = {
-        { &hadc1, ADC_CHANNEL_1, 1.0f }, // AI0
-        { &hadc1, ADC_CHANNEL_2, 1.0f }, // AI1
+        { &hadc1, ADC_CHANNEL_0, 1.0f }, // AI0
+        { &hadc1, ADC_CHANNEL_1, 1.0f }, // AI1
 };
 
 /* Пример:
@@ -113,10 +113,10 @@ static const uint16_t hw_pwm_count = sizeof(hw_pwm) / sizeof(hw_pwm[0]);
 static uint32_t adc_read_blocking(ADC_HandleTypeDef* hadc, uint32_t channel)
 {
     ADC_ChannelConfTypeDef sConfig = {0};
-
+    HAL_ADC_Stop(hadc);
     sConfig.Channel      = channel;
     sConfig.Rank         = 1;
-    sConfig.SamplingTime = ADC_SAMPLETIME_15CYCLES; // подбери при настройке ADC
+    sConfig.SamplingTime = ADC_SAMPLETIME_144CYCLES; // подбери при настройке ADC
     // Для F4 может потребоваться заполнить дополнительные поля, смотри CubeMX
 
     HAL_ADC_ConfigChannel(hadc, &sConfig);

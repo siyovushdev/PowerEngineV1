@@ -8,13 +8,18 @@
 #include <stdio.h>
 
 #ifndef USB_LOG_BUF_SZ
-#define USB_LOG_BUF_SZ 2048
+#define USB_LOG_BUF_SZ 1024
 #endif
 
 static uint8_t ring[USB_LOG_BUF_SZ];
 static volatile size_t w = 0, r = 0;
 static SemaphoreHandle_t mtx;
 static TaskHandle_t txTask;
+
+static inline int cdc_ready(void){
+    extern USBD_HandleTypeDef hUsbDeviceFS;
+    return (hUsbDeviceFS.dev_state == USBD_STATE_CONFIGURED);
+}
 
 static size_t _space(void) {
     size_t rw = w, rr = r;
@@ -50,8 +55,17 @@ static void UsbLog_Task(void* arg) {
             n = _pull(chunk, sizeof(chunk));
             xSemaphoreGive(mtx);
             if (n) {
+                if (!cdc_ready()) {
+                    // USB не готов — просто дропаем кусок (или положите обратно, если нужно)
+                    continue;
+                }
+                // Ограничим «залипание» на BUSY, чтобы не блокировать систему
+                uint32_t tries = 0;
                 while (CDC_Transmit_FS(chunk, n) == USBD_BUSY) {
-                    vTaskDelay(1);
+                    vTaskDelay(pdMS_TO_TICKS(1));
+                    if (++tries > 20) { // ~20 мс терпения
+                        break;          // дропаем остаток, идём дальше
+                    }
                 }
             }
         } while (n);
@@ -60,7 +74,7 @@ static void UsbLog_Task(void* arg) {
 
 void UsbLog_Init(void) {
     mtx = xSemaphoreCreateMutex();
-    xTaskCreate(UsbLog_Task, "UsbLogTx", 512, NULL, tskIDLE_PRIORITY+2, &txTask);
+    xTaskCreate(UsbLog_Task, "UsbLogTx", 1024, NULL, tskIDLE_PRIORITY+2, &txTask);
 }
 
 void UsbLog_PutFromISR(const char* s, size_t n) {
@@ -70,7 +84,9 @@ void UsbLog_PutFromISR(const char* s, size_t n) {
     if (n > free) n = free;               // без ожиданий — лишнее отбрасываем
     _push((const uint8_t*)s, n);
     taskEXIT_CRITICAL_FROM_ISR(prim);
-    vTaskNotifyGiveFromISR(txTask, NULL); // разбудить TX-таску
+    if (txTask) {                    // ВАЖНО: проверяем handle
+        vTaskNotifyGiveFromISR(txTask, NULL); // разбудить TX-таску
+    }
 }
 
 void UsbLog_Put(const char* s, size_t n) {
@@ -80,6 +96,8 @@ void UsbLog_Put(const char* s, size_t n) {
     if (n > free) n = free;           // обрезаем тихо (или можно дожидаться)
     _push((const uint8_t*)s, n);
     xSemaphoreGive(mtx);
+    // Разбудить TX-таску сразу, а не ждать 5 мс
+    xTaskNotifyGive(txTask);
 }
 
 void UsbLog_Puts(const char* s) {

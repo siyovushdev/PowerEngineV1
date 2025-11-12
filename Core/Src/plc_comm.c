@@ -130,12 +130,8 @@ void process_bytes_in_task(const uint8_t *data, size_t n) {
             uint16_t crc_rx   = (uint16_t)(((uint16_t)crc_hi << 8) | crc_lo); // на проводе [lo][hi]
 
             if (crc_calc == crc_rx) {
-                Frame f;
-                f.len = payloadLen;
-                memcpy(f.payload, acc_buf, payloadLen);
-
                 CborReply rep;
-                on_cbor_frame_received(f.payload, f.len, &rep);
+                on_cbor_frame_received(acc_buf, payloadLen, &rep);
                 if (rep.len > 0) {
 
                     uart_send(rep.data, rep.len, pdMS_TO_TICKS(5));

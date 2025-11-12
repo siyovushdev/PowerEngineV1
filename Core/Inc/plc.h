@@ -15,6 +15,9 @@ extern "C" {
 #define PLC_CYCLE_MS_MIN 5        // защита от слишком частого цикла
 #define PLC_CYCLE_MS_MAX 100      // защита от слишком редкого цикла
 
+#define PLC_NODE_FLAG_PID_CLAMP_0_100   (1u<<8)   // выход 0..100
+#define PLC_NODE_FLAG_PID_CLAMP_0_1     (1u<<9)   // выход 0..1
+
 typedef enum {
     PLC_VAL_BOOL  = 0,  // Логическое значение: 0 или 1 (дискретные сигналы, кнопки, реле, флаги)
     PLC_VAL_INT   = 1,  // Целое число (обычно 32-битное): используется для счётчиков, порогов, параметров
@@ -44,6 +47,7 @@ typedef enum {
     PLC_NODE_SCALE      = 19, // y=a*x+b; a=paramFloat; b=paramInt/1000
     PLC_NODE_ADD        = 20, // out = inA + inB (float)
     PLC_NODE_LIMIT      = 21,  // clamp: min=paramInt/1000; max=paramMs/1000
+    PLC_NODE_PID        = 22
 
 } PlcNodeType;
 
@@ -103,6 +107,11 @@ typedef struct {
     bool     force_en;        // Включён ли ручной режим (игнорировать входы)
     bool     force_bool;      // Принудительное значение (0/1), удерживаемое в ручном режиме
     uint32_t force_left_ms;   // Сколько миллисекунд ещё держать принудительное состояние
+
+    /* --- PID runtime --- */
+    float    pid_i;          // интегральная составляющая
+    float    pid_prev_meas;  // предыдущее PV для d(PV)/dt
+    bool     pid_inited;     // флаг инициализации
 } PlcNode;
 
 typedef struct {
