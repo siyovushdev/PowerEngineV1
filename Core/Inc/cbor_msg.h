@@ -1,13 +1,5 @@
 #pragma once
 #include <stdint.h>
-#include <stddef.h>
-#include <stdbool.h>
-#include "stm32f4xx_hal.h"
-#include "cbor.h"
-
-
-#include "adc.h"
-#include "plc.h"
 #include <string.h>
 
 #ifndef CBOR_MAX_REPLY

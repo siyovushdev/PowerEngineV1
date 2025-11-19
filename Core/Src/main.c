@@ -32,6 +32,7 @@
 #include "plc_persist.h"
 #include "uart2_cmd_handler.h"
 #include "logf.h"
+#include "plc_log.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -157,7 +158,7 @@ int main(void) {
 
     LOGI("Init done, ver=%u", 1u);
     LOGD("Debug details x=%ld", (long)123);
-
+    plc_log_init();
     if (!plc_persist_load_active()){
         // если ничего нет — твой тестовый:
         LOGD("plc_persist_load_active false\r\n");

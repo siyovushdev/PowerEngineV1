@@ -2,6 +2,11 @@
 #include "plc_persist.h"
 #include "logf.h"
 #include <math.h>  // для INFINITY, NAN (если нет — могу заменить на макросы)
+#include "cbor.h"
+#include "plc.h"
+#include "FreeRTOS.h"
+#include "task.h"
+#include "plc_log.h"
 
 static const char *tag = "CBOR";
 
@@ -176,10 +181,22 @@ static const char *cbor_type_name(CborType t) {
 
 static inline bool _ok(CborError e){ return e==CborNoError; }
 
+extern void proto_get_counters(uint32_t *rx_ok, uint32_t *rx_crc, uint32_t *rx_parse, uint32_t *tx_ok);
+
+// ---- PLC runtime metrics ----
+extern uint32_t g_scan_cnt;
+extern uint32_t g_scan_ms_accum;     // сумма длительностей шага (мс)
+extern uint16_t g_scan_ms_max;       // максимум за период
+extern uint32_t g_scan_long_steps;   // шагов > g_activeGraph.cycleMs
 void send_status_reply(CborReply *out)
 {
+    plc_log_put(PLC_EVT_STATUS_REQ, 0, 0);
     // Буфер ответа (подбери при необходимости)
     CborEncoder root, map, arr, nmap;
+
+    uint32_t rx_ok, rx_crc, rx_parse, tx_ok;
+    proto_get_counters(&rx_ok, &rx_crc, &rx_parse, &tx_ok);
+
 
     // Снимок для консистентности
     bool     active;
@@ -211,6 +228,28 @@ void send_status_reply(CborReply *out)
     if(!_ok(cbor_encode_text_stringz(&map, "cycleMs"))) goto send;
     if(!_ok(cbor_encode_uint(&map, cycle))) goto send;
 
+    if(!_ok(cbor_encode_text_stringz(&map, "scanAvgMs"))) goto send;
+    if(!_ok(cbor_encode_uint(&map, g_scan_cnt ? (g_scan_ms_accum / g_scan_cnt) : 0))) goto send;
+
+    if(!_ok(cbor_encode_text_stringz(&map, "scanMaxMs"))) goto send;
+    if(!_ok(cbor_encode_uint(&map, g_scan_ms_max))) goto send;
+
+    if(!_ok(cbor_encode_text_stringz(&map, "scanLongSteps"))) goto send;
+    if(!_ok(cbor_encode_uint(&map, g_scan_long_steps))) goto send;
+
+    cbor_encode_text_stringz(&map, "proto");
+    CborEncoder proto;
+    cbor_encoder_create_map(&map, &proto, 4);
+    cbor_encode_text_stringz(&proto, "rx");
+    cbor_encode_uint(&proto, rx_ok);
+    cbor_encode_text_stringz(&proto, "crcErr");
+    cbor_encode_uint(&proto, rx_crc);
+    cbor_encode_text_stringz(&proto, "parseErr");
+    cbor_encode_uint(&proto, rx_parse);
+    cbor_encode_text_stringz(&proto, "tx");
+    cbor_encode_uint(&proto, tx_ok);
+    cbor_encoder_close_container(&map, &proto);
+
     // nodesCount
     if(!_ok(cbor_encode_text_stringz(&map, "nodesCount"))) goto send;
     if(!_ok(cbor_encode_uint(&map, cnt))) goto send;
@@ -218,6 +257,8 @@ void send_status_reply(CborReply *out)
     // nodesState: массив узлов
     if(!_ok(cbor_encode_text_stringz(&map, "nodesState"))) goto send;
     if(!_ok(cbor_encoder_create_array(&map, &arr, cnt))) goto send;
+
+
 
     if (active) {
         taskENTER_CRITICAL();
@@ -259,6 +300,21 @@ void send_status_reply(CborReply *out)
                 if(!_ok(cbor_encode_text_stringz(&nmap, "toffLeftMs"))) goto ns_close;
                 if(!_ok(cbor_encode_uint(&nmap, n->toff_left_ms))) goto ns_close;
             }
+            if (n->type == PLC_NODE_PID) {
+                float sp = (n->inA >= 0) ? g_activeGraph.nodes[n->inA].out.f : 0.0f;
+                float pv = (n->inB >= 0) ? g_activeGraph.nodes[n->inB].out.f : 0.0f;
+                // локально сохрани p_term/d_term/u при расчёте PID (например, в node->debug_p, debug_d, debug_u),
+                // либо пересчитай p_term/d_term тут, если хранишь только итог u и pid_i.
+
+                cbor_encode_text_stringz(&nmap, "sp");
+                cbor_encode_float(&nmap, sp);
+                cbor_encode_text_stringz(&nmap, "pv");
+                cbor_encode_float(&nmap, pv);
+                cbor_encode_text_stringz(&nmap, "i");
+                cbor_encode_float(&nmap, n->pid_i);
+                cbor_encode_text_stringz(&nmap, "u");
+                cbor_encode_float(&nmap, n->out.f);
+            }
             if (n->flags & PLC_NODE_FLAG_FORCE) {
                 if(!_ok(cbor_encode_text_stringz(&nmap, "force"))) goto ns_close;
                 if(!_ok(cbor_encode_boolean(&nmap, n->force_en))) goto ns_close;
@@ -279,6 +335,30 @@ void send_status_reply(CborReply *out)
     }
 
     if(!_ok(cbor_encoder_close_container(&map, &arr))) goto send;
+
+    // logs: последние 32 записи
+    uint16_t n = plc_log_count();
+    uint16_t take = (n > 32) ? 32 : n;
+    cbor_encode_text_stringz(&map, "log");
+    CborEncoder arr2;
+    cbor_encoder_create_array(&map, &arr2, take);
+
+    for (uint16_t i = 0; i < take; i++){
+        uint16_t idx = ( (g_head + PLC_LOG_CAP) - (take - i) ) % PLC_LOG_CAP;
+        PlcLogEntry *le = &g_log[idx];
+        CborEncoder rec;
+        cbor_encoder_create_map(&arr2, &rec, 3);
+        cbor_encode_text_stringz(&rec, "t"); cbor_encode_uint(&rec, le->ts_ms);
+        cbor_encode_text_stringz(&rec, "c"); cbor_encode_uint(&rec, le->code);
+        cbor_encode_text_stringz(&rec, "ab");
+        CborEncoder ab;
+        cbor_encoder_create_array(&rec, &ab, 2);
+        cbor_encode_int(&ab, le->a);
+        cbor_encode_int(&ab, le->b);
+        cbor_encoder_close_container(&rec, &ab);
+        cbor_encoder_close_container(&arr2, &rec);
+    }
+    cbor_encoder_close_container(&map, &arr2);
 
     // закрыть корневую map
     if(!_ok(cbor_encoder_close_container(&root, &map))) goto send;
@@ -345,6 +425,47 @@ static void send_simple_ack(const char* cmdName, bool ok, CborReply *out)
 
 static void send_activate_graph_ack(bool ok, CborReply *out)  { send_simple_ack("activate_graph_ack", ok, out); }
 static void send_force_output_ack(bool ok, CborReply *out)    { send_simple_ack("force_output_ack", ok, out); }
+
+extern const PlcLogEntry* plc_log_get_by_index(uint16_t idx);
+void send_log_dump_reply(CborReply *out)
+{
+    if (!out) return; out->len = 0;
+    CborEncoder enc, map, arr;
+
+    cbor_encoder_init(&enc, out->data, sizeof(out->data), 0);
+    cbor_encoder_create_map(&enc, &map, CborIndefiniteLength);
+
+    cbor_encode_text_stringz(&map, "cmd");
+    cbor_encode_text_stringz(&map, "log_dump");
+
+    // сюда выводим весь ring-buffer
+    cbor_encode_text_stringz(&map, "log");
+    CborEncoder arrEnc;
+    uint16_t n = plc_log_count();
+    cbor_encoder_create_array(&map, &arrEnc, n);
+
+    for (uint16_t i = 0; i < n; i++) {
+        const PlcLogEntry* le = plc_log_get_by_index(i); // добавь геттер
+        CborEncoder rec;
+        cbor_encoder_create_map(&arrEnc, &rec, 3);
+        cbor_encode_text_stringz(&rec, "t"); cbor_encode_uint(&rec, le->ts_ms);
+        cbor_encode_text_stringz(&rec, "c"); cbor_encode_uint(&rec, le->code);
+        cbor_encode_text_stringz(&rec, "ab");
+        CborEncoder ab;
+        cbor_encoder_create_array(&rec, &ab, 2);
+        cbor_encode_int(&ab, le->a);
+        cbor_encode_int(&ab, le->b);
+        cbor_encoder_close_container(&rec, &ab);
+        cbor_encoder_close_container(&arrEnc, &rec);
+    }
+
+    cbor_encoder_close_container(&map, &arrEnc);
+    cbor_encoder_close_container(&enc, &map);
+
+    size_t len = cbor_encoder_get_buffer_size(&enc, out->data);
+    out->len = len;
+}
+
 
 static bool get_int32(const CborValue *val, int32_t *out) {
     if (!cbor_value_is_integer(val)) return false;
@@ -737,6 +858,11 @@ bool parse_cmd_upload_graph(CborValue root) {
     LOGT(tag, "graph summary: nodes=%u cycleMs=%u", (unsigned)tmp->nodeCount, (unsigned)tmp->cycleMs);
 
     bool ok = plc_upload_graph(tmp);   // внутри копируйте в staging или active
+    if (ok) {
+        plc_log_put(PLC_EVT_UPLOAD_OK, /*a=*/(int16_t)tmp->nodeCount, /*b=*/(int16_t)tmp->cycleMs);
+    } else {
+        plc_log_put(PLC_EVT_UPLOAD_FAIL, 0, 0);
+    }
     vPortFree(tmp);
     LOGT(tag, "plc_upload_graph -> %s", ok ? "OK" : "FAIL");
     return ok;
@@ -801,6 +927,7 @@ void on_cbor_frame_received(const uint8_t *buf, size_t len, CborReply* out) {
     if (strcmp(cmdBuf, "upload_graph") == 0) {
         LOGT(tag, "upload_graph");
         bool ok = parse_cmd_upload_graph(root);
+
         send_upload_graph_ack(ok, out);
         return;
     }
@@ -827,6 +954,12 @@ void on_cbor_frame_received(const uint8_t *buf, size_t len, CborReply* out) {
         send_simple_ack("load_active_ack", ok, out);
         return;
     }
+
+    if (strcmp(cmdBuf, "log_dump") == 0) {
+        send_log_dump_reply(out);
+        return;
+    }
+
 
     LOGT(tag, "unknown cmd");
 }

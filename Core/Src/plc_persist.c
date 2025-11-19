@@ -1,10 +1,14 @@
 #include "plc_persist.h"
 #include "stm32f4xx_hal.h"
 #include <string.h>
+#include "plc.h"
 
 // TinyCBOR
 #include "cbor.h"
 #include "logf.h"
+#include "FreeRTOS.h"
+#include "task.h"
+
 #define TAG = "PERSIST";
 static const char *tag = "PERSIST";
 // Короткое имя кода ошибки CBOR
@@ -319,9 +323,7 @@ static bool flash_write_aligned(uint32_t addr, const uint8_t* data, size_t len){
 
 
 // ===== Публичные API =====
-bool plc_persist_save_active(void)
-{
-    return false;
+bool plc_persist_save_active(void){
     static uint8_t buf[32 + 6144];
 
     size_t cborLen = 0;
@@ -382,7 +384,6 @@ bool plc_persist_save_active(void)
 
 bool plc_persist_load_active(void)
 {
-    return false;
     // 1) Прочитать заголовок
     const PlcPersistHeader* hdr = (const PlcPersistHeader*)PLC_FLASH_SECTOR_ADDR;
     LOGT(tag, "load_active: hdr{magic=0x%08lX ver=%u len=%lu crc=0x%08lX stamp=%lu}",

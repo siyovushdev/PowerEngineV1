@@ -5,10 +5,7 @@ extern "C" {
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "stm32f4xx_hal.h"
-#include "FreeRTOS.h"
-#include "task.h"
-#include "queue.h"
+
 
 /* ================== Константы и типы ================== */
 #define PLC_MAX_NODES 64          // подбери под свою память
@@ -49,7 +46,8 @@ typedef enum {
     PLC_NODE_LIMIT      = 21,  // clamp: min=paramInt/1000; max=paramMs/1000
     PLC_NODE_PID        = 22,
     PLC_NODE_ANALOG_AVG = 23,  // сглаживание: y += alpha*(x - y); alpha = paramInt/1000
-    PLC_NODE_RAMP       = 24   // ограничение скорости: |y - prev| <= rate*dt; rate = paramInt/1000 ед/с
+    PLC_NODE_RAMP       = 24,   // ограничение скорости: |y - prev| <= rate*dt; rate = paramInt/1000 ед/с
+    PLC_NODE_LOG        = 25,  // лог: периодически пишет значение входа в plc_log
 
 
 } PlcNodeType;
@@ -121,6 +119,8 @@ typedef struct {
     bool   filt_inited;   // инициализация фильтра
     float  ramp_prev;     // для RAMP: предыдущий выход
     bool   ramp_inited;
+
+    uint32_t log_accum_ms;   // накопленное время с последней записи
 } PlcNode;
 
 typedef struct {
@@ -156,7 +156,7 @@ typedef struct {
 } PlcCmd;
 
 // Очередь команд
-extern QueueHandle_t plcCmdQueue;
+//extern QueueHandle_t plcCmdQueue;
 
 /* ================== Публичные функции ПЛК ================== */
 

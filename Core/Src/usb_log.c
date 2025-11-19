@@ -43,6 +43,25 @@ static size_t _pull(uint8_t* d, size_t maxn) {
 }
 
 
+void Usb_SendBlocking(const uint8_t* data, size_t n)
+{
+    while (n > 0) {
+        uint16_t chunk = (n > 64) ? 64 : (uint16_t)n;  // размер пакета USB FS
+
+        uint32_t t0 = HAL_GetTick();
+        while (CDC_Transmit_FS((uint8_t*)data, chunk) == USBD_BUSY) {
+            if ((HAL_GetTick() - t0) > 20) {
+                // более 20 мс BUSY — дропаем остаток
+                return;
+            }
+        }
+
+        data += chunk;
+        n    -= chunk;
+    }
+}
+
+
 static void UsbLog_Task(void* arg) {
     uint8_t chunk[256];
     for (;;) {

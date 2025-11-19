@@ -1,7 +1,6 @@
 #pragma once
 #include <stdbool.h>
-#include <stdint.h>
-#include "plc.h"
+
 
 // ==== Конфигурация сектора (переопредели в проекте при необходимости) ====
 // Для STM32F411(xE): Sector7 = 0x08060000, размер 128 KB.

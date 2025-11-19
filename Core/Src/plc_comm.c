@@ -6,6 +6,7 @@
 #include "cbor.h"  // поправь путь на свой tinycbor header
 #include "cbor_msg.h"
 #include "uart2_cmd_handler.h"
+#include "plc_log.h"
 
 #define FRAME_MAX_PAYLOAD  1024u
 
@@ -29,6 +30,24 @@ static inline void rx_reset(void) {
     acc_need = 0;
     crc_lo = 0;
     crc_hi = 0;
+}
+
+// ---- protocol counters ----
+static uint32_t g_rx_frames = 0;
+static uint32_t g_rx_crc_err = 0;
+static uint32_t g_rx_parse_err = 0;
+static uint32_t g_tx_frames = 0;
+
+void proto_count_rx_frame_ok(void){ g_rx_frames++; }
+void proto_count_rx_crc_err(void){ g_rx_crc_err++; }
+void proto_count_rx_parse_err(void){ g_rx_parse_err++; }
+void proto_count_tx_frame(void){ g_tx_frames++; }
+
+void proto_get_counters(uint32_t *rx_ok, uint32_t *rx_crc, uint32_t *rx_parse, uint32_t *tx_ok){
+    if(rx_ok) *rx_ok = g_rx_frames;
+    if(rx_crc) *rx_crc = g_rx_crc_err;
+    if(rx_parse) *rx_parse = g_rx_parse_err;
+    if(tx_ok) *tx_ok = g_tx_frames;
 }
 
 /* -----------------------------------------
@@ -130,12 +149,16 @@ void process_bytes_in_task(const uint8_t *data, size_t n) {
             uint16_t crc_rx   = (uint16_t)(((uint16_t)crc_hi << 8) | crc_lo); // на проводе [lo][hi]
 
             if (crc_calc == crc_rx) {
+                proto_count_rx_frame_ok();
                 CborReply rep;
                 on_cbor_frame_received(acc_buf, payloadLen, &rep);
                 if (rep.len > 0) {
 
                     uart_send(rep.data, rep.len, pdMS_TO_TICKS(5));
                 }
+            } else{
+                proto_count_rx_crc_err();
+                plc_log_put(PLC_EVT_CRC_ERR, (int16_t)payloadLen, 0);
             }
             rx_reset(); // готов к следующему кадру
         }

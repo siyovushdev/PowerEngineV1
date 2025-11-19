@@ -2,10 +2,10 @@
 #include "plc_comm.h"
 #include "FreeRTOS.h"
 #include "task.h"
-#include "queue.h"
+#include "main.h"
 #include "message_buffer.h"
 #include "semphr.h"
-#include "logf.h"
+
 #include "debug_utils.h"
 
 #define UART_STREAM_SIZE     1024u
@@ -27,8 +27,8 @@ static uint8_t s_staging[UART_STAGING_SZ];
 
 void init_rtos(void)
 {
-    plcCmdQueue = xQueueCreate(8, sizeof(PlcCmd));
-    CHECK_OK(plcCmdQueue!=NULL, "plcCmdQueue 1K");
+//    plcCmdQueue = xQueueCreate(8, sizeof(PlcCmd));
+//    CHECK_OK(plcCmdQueue!=NULL, "plcCmdQueue 1K");
 
     g_uartRxStream = xStreamBufferCreate(UART_STREAM_SIZE, UART_TRIGGER_LEVEL);
     CHECK_OK(g_uartRxStream!=NULL, "g_uartRxStream 1K");

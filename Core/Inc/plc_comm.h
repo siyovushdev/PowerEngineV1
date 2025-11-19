@@ -5,8 +5,9 @@ extern "C" {
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "plc.h"
-#include "stream_buffer.h"
+#include <stddef.h>
+#include "FreeRTOS.h"
+#include "portmacro.h"
 
 /*
 * Структура кадра, который мы принимаем из UART.

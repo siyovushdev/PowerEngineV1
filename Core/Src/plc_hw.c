@@ -1,6 +1,7 @@
 #include "plc.h"
 #include "stm32f4xx_hal.h"
-
+#include "FreeRTOS.h"
+#include "task.h"
 /*
  * ВАЖНО:
  * Здесь мы только связываем логические каналы PLC (DI0, DO0, AI0, PWM0)
@@ -65,7 +66,7 @@ typedef struct {
 */
 static const HwDiscreteInMap hw_di[] = {
         { GPIOA, GPIO_PIN_10, false },  // DI0
-        { GPIOA, GPIO_PIN_1, false  },  // DI1
+        { GPIOA, GPIO_PIN_9, false  },  // DI1
 };
 
 /* Пример:
@@ -157,7 +158,7 @@ static inline void timer_set_ccr(TIM_HandleTypeDef* htim, uint32_t channel, uint
  */
 uint32_t now_ms(void)
 {
-    return HAL_GetTick();
+    return xTaskGetTickCount() * portTICK_PERIOD_MS;
 }
 
 /* iwdg_feed()
@@ -251,3 +252,4 @@ void hw_write_pwm_output(int logicalCh, int dutyPercent)
 
     timer_set_ccr(m->htim, m->channel, ccr);
 }
+
