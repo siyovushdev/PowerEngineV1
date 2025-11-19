@@ -6,6 +6,8 @@ extern "C" {
 #include <stdint.h>
 #include <stdbool.h>
 
+#define ADC_CH_NUM 4
+extern volatile uint16_t g_adcRaw[ADC_CH_NUM];
 
 /* ================== Константы и типы ================== */
 #define PLC_MAX_NODES 64          // подбери под свою память

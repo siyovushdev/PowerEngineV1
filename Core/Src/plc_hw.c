@@ -2,6 +2,7 @@
 #include "stm32f4xx_hal.h"
 #include "FreeRTOS.h"
 #include "task.h"
+
 /*
  * ВАЖНО:
  * Здесь мы только связываем логические каналы PLC (DI0, DO0, AI0, PWM0)
@@ -16,8 +17,8 @@
 /* ----- Внешние HAL-хэндлы, которые уже должны быть созданы в проекте ----- */
 
 extern IWDG_HandleTypeDef hiwdg;
-extern ADC_HandleTypeDef  hadc1;
 extern TIM_HandleTypeDef  htim4;
+extern TIM_HandleTypeDef  htim1;   // добавлено для TIM1 (PA8, PA9)
 extern UART_HandleTypeDef huart2;
 
 /* ------------------------------------------------------------------------- */
@@ -42,11 +43,12 @@ typedef struct {
     bool          inverted;
 } HwDiscreteOutMap;
 
-/* Аналоговые входы (PLC_NODE_AI_IN) */
+/* Аналоговые входы (PLC_NODE_AI_IN)
+ * вместо hadc/channel оставляем индекс в g_adcRaw[]
+ */
 typedef struct {
-    ADC_HandleTypeDef* hadc;
-    uint32_t           channel;    // ADC_CHANNEL_x
-    float              scale;      // масштаб, если нужно переводить в физику
+    uint8_t bufIndex;   // индекс в g_adcRaw[]
+    float   scale;      // масштаб (если понадобится)
 } HwAnalogInMap;
 
 /* ШИМ выходы (PLC_NODE_PWM_OUT)
@@ -58,77 +60,85 @@ typedef struct {
     uint32_t           channel;    // TIM_CHANNEL_1 и т.д.
 } HwPwmOutMap;
 
-/* ТУТ ТЫ ДОЛЖЕН ЗАПОЛНИТЬ ПРАВИЛЬНО ПОД СВОЮ F411 BLACK PILL */
+/* ------------------------------------------------------------------------- */
+/*                  Конкретная привязка под F411 Black Pill                  */
+/* ------------------------------------------------------------------------- */
 
-/* Пример (заглушка):
-   DI0 -> PA0 (прямой)
-   DI1 -> PA1 (инверсный)
-*/
+/* DI:
+ * DI0 -> PA10
+ * DI1 -> PB10
+ * DI2 -> PB12
+ * DI3 -> PB13
+ * DI4 -> PB14
+ * DI5 -> PB15
+ *
+ * Все прямые (inverted = false). Если где-то "активный низкий" — поменяешь.
+ */
 static const HwDiscreteInMap hw_di[] = {
         { GPIOA, GPIO_PIN_10, false },  // DI0
-        { GPIOA, GPIO_PIN_9, false  },  // DI1
+        { GPIOB, GPIO_PIN_10, false },  // DI1
+        { GPIOB, GPIO_PIN_12, false },  // DI2
+        { GPIOB, GPIO_PIN_13, false },  // DI3
+        { GPIOB, GPIO_PIN_14, false },  // DI4
+        { GPIOB, GPIO_PIN_15, false },  // DI5
 };
 
-/* Пример:
-   DO0 -> PA5 (светодиод/реле), прямой
-   DO1 -> PB12, прямой
-*/
+/* DO:
+ * DO0 -> PA4
+ * DO1 -> PA15
+ * DO2 -> PB2
+ * DO3 -> PB3
+ * DO4 -> PB4
+ * DO5 -> PB5
+ *
+ * Все прямые. Если нужно "active-low" — выставишь inverted = true.
+ */
 static const HwDiscreteOutMap hw_do[] = {
-        { GPIOB, GPIO_PIN_4, false },  // DO0
-        { GPIOB, GPIO_PIN_3,false },  // DO1
+        { GPIOA, GPIO_PIN_4,  false },  // DO0
+        { GPIOA, GPIO_PIN_15, false },  // DO1
+        { GPIOB, GPIO_PIN_2,  false },  // DO2
+        { GPIOB, GPIO_PIN_3,  false },  // DO3
+        { GPIOB, GPIO_PIN_4,  false },  // DO4
+        { GPIOB, GPIO_PIN_5,  false },  // DO5
 };
 
-/* Пример:
-   AI0 -> ADC1 CH1
-   AI1 -> ADC1 CH2
-*/
+/* AI:
+ * AI0 -> g_adcRaw[0] (ADC1_IN0, PA0)
+ * AI1 -> g_adcRaw[1] (ADC1_IN1, PA1)
+ * AI2 -> g_adcRaw[2] (ADC1_IN8, PB0)
+ * AI3 -> g_adcRaw[3] (ADC1_IN9, PB1)
+ */
 static const HwAnalogInMap hw_ai[] = {
-        { &hadc1, ADC_CHANNEL_0, 1.0f }, // AI0
-        { &hadc1, ADC_CHANNEL_1, 1.0f }, // AI1
+        { 0, 1.0f }, // AI0
+        { 1, 1.0f }, // AI1
+        { 2, 1.0f }, // AI2
+        { 3, 1.0f }, // AI3
 };
 
-/* Пример:
-   PWM0 -> TIM4 CH1
-   PWM1 -> TIM4 CH2
-   Внимание: таймер должен быть уже настроен в PWM режиме и запущен.
-*/
+/* PWM:
+ * PWM0 -> TIM1_CH1 (PA8)
+ * PWM1 -> TIM4_CH1 (PB6)
+ * PWM2 -> TIM4_CH2 (PB7)
+ * PWM3 -> TIM1_CH2 (PA9)
+ *
+ * Таймеры должны быть настроены в PWM-режиме и запущены.
+ */
 static const HwPwmOutMap hw_pwm[] = {
-        { &htim4, TIM_CHANNEL_1 }, // PWM0
-        { &htim4, TIM_CHANNEL_2 }, // PWM1
+        { &htim1, TIM_CHANNEL_1 }, // PWM0 -> PA8
+        { &htim4, TIM_CHANNEL_1 }, // PWM1 -> PB6
+        { &htim4, TIM_CHANNEL_2 }, // PWM2 -> PB7
+        { &htim1, TIM_CHANNEL_2 }, // PWM3 -> PA9
 };
 
 /* Размеры таблиц */
-static const uint16_t hw_di_count  = sizeof(hw_di)  / sizeof(hw_di[0]);
-static const uint16_t hw_do_count  = sizeof(hw_do)  / sizeof(hw_do[0]);
-static const uint16_t hw_ai_count  = sizeof(hw_ai)  / sizeof(hw_ai[0]);
-static const uint16_t hw_pwm_count = sizeof(hw_pwm) / sizeof(hw_pwm[0]);
+static const uint16_t hw_di_count   = sizeof(hw_di)  / sizeof(hw_di[0]);
+static const uint16_t hw_do_count   = sizeof(hw_do)  / sizeof(hw_do[0]);
+static const uint16_t hw_ai_count   = sizeof(hw_ai)  / sizeof(hw_ai[0]);
+static const uint16_t hw_pwm_count  = sizeof(hw_pwm) / sizeof(hw_pwm[0]);
 
 /* ------------------------------------------------------------------------- */
 /*                     Локальные вспомогательные функции                     */
 /* ------------------------------------------------------------------------- */
-
-/* Простое блочное чтение одного канала АЦП.
- * Для продакшена ты можешь перейти на DMA или мультиканальный скан.
- * Сейчас — минимум, чтобы жило.
- */
-static uint32_t adc_read_blocking(ADC_HandleTypeDef* hadc, uint32_t channel)
-{
-    ADC_ChannelConfTypeDef sConfig = {0};
-    HAL_ADC_Stop(hadc);
-    sConfig.Channel      = channel;
-    sConfig.Rank         = 1;
-    sConfig.SamplingTime = ADC_SAMPLETIME_144CYCLES; // подбери при настройке ADC
-    // Для F4 может потребоваться заполнить дополнительные поля, смотри CubeMX
-
-    HAL_ADC_ConfigChannel(hadc, &sConfig);
-
-    HAL_ADC_Start(hadc);
-    HAL_ADC_PollForConversion(hadc, 10); // timeout 10 мс
-    uint32_t v = HAL_ADC_GetValue(hadc);
-    HAL_ADC_Stop(hadc);
-
-    return v;
-}
 
 /* Возвращает ARR таймера (AUTO-RELOAD), чтобы конвертировать duty% в CCR */
 static inline uint32_t timer_get_arr(TIM_HandleTypeDef* htim)
@@ -153,8 +163,7 @@ static inline void timer_set_ccr(TIM_HandleTypeDef* htim, uint32_t channel, uint
 /* ------------------------------------------------------------------------- */
 
 /* now_ms()
- * Должно возвращать аптайм в миллисекундах.
- * На STM32 HAL_GetTick() уже даёт миллисекунды после HAL_Init().
+ * Возвращает аптайм в миллисекундах по тикам FreeRTOS.
  */
 uint32_t now_ms(void)
 {
@@ -224,11 +233,13 @@ int32_t hw_read_adc_input(int logicalCh)
 
     const HwAnalogInMap* m = &hw_ai[logicalCh];
 
-    uint32_t raw = adc_read_blocking(m->hadc, m->channel);
+    // чтение из DMA-буфера
+    uint16_t raw = g_adcRaw[m->bufIndex];   // чтение 16 бит — атомарно на M4
 
-    // Если хочешь физику:
-    // float volts = raw * m->scale;
-    // Но ПЛК-движку достаточно raw. Он сам хранит .out.i/.out.f.
+    // если нужна шкала в будущем:
+    // float v = (float)raw * m->scale;
+    // return (int32_t)lroundf(v);
+
     return (int32_t)raw;
 }
 
@@ -252,4 +263,3 @@ void hw_write_pwm_output(int logicalCh, int dutyPercent)
 
     timer_set_ccr(m->htim, m->channel, ccr);
 }
-
