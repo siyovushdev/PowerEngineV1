@@ -237,18 +237,18 @@ void send_status_reply(CborReply *out)
     if(!_ok(cbor_encode_text_stringz(&map, "scanLongSteps"))) goto send;
     if(!_ok(cbor_encode_uint(&map, g_scan_long_steps))) goto send;
 
-    cbor_encode_text_stringz(&map, "proto");
-    CborEncoder proto;
-    cbor_encoder_create_map(&map, &proto, 4);
-    cbor_encode_text_stringz(&proto, "rx");
-    cbor_encode_uint(&proto, rx_ok);
-    cbor_encode_text_stringz(&proto, "crcErr");
-    cbor_encode_uint(&proto, rx_crc);
-    cbor_encode_text_stringz(&proto, "parseErr");
-    cbor_encode_uint(&proto, rx_parse);
-    cbor_encode_text_stringz(&proto, "tx");
-    cbor_encode_uint(&proto, tx_ok);
-    cbor_encoder_close_container(&map, &proto);
+//    cbor_encode_text_stringz(&map, "proto");
+//    CborEncoder proto;
+//    cbor_encoder_create_map(&map, &proto, 4);
+//    cbor_encode_text_stringz(&proto, "rx");
+//    cbor_encode_uint(&proto, rx_ok);
+//    cbor_encode_text_stringz(&proto, "crcErr");
+//    cbor_encode_uint(&proto, rx_crc);
+//    cbor_encode_text_stringz(&proto, "parseErr");
+//    cbor_encode_uint(&proto, rx_parse);
+//    cbor_encode_text_stringz(&proto, "tx");
+//    cbor_encode_uint(&proto, tx_ok);
+//    cbor_encoder_close_container(&map, &proto);
 
     // nodesCount
     if(!_ok(cbor_encode_text_stringz(&map, "nodesCount"))) goto send;
@@ -336,29 +336,29 @@ void send_status_reply(CborReply *out)
 
     if(!_ok(cbor_encoder_close_container(&map, &arr))) goto send;
 
-    // logs: последние 32 записи
-    uint16_t n = plc_log_count();
-    uint16_t take = (n > 32) ? 32 : n;
-    cbor_encode_text_stringz(&map, "log");
-    CborEncoder arr2;
-    cbor_encoder_create_array(&map, &arr2, take);
-
-    for (uint16_t i = 0; i < take; i++){
-        uint16_t idx = ( (g_head + PLC_LOG_CAP) - (take - i) ) % PLC_LOG_CAP;
-        PlcLogEntry *le = &g_log[idx];
-        CborEncoder rec;
-        cbor_encoder_create_map(&arr2, &rec, 3);
-        cbor_encode_text_stringz(&rec, "t"); cbor_encode_uint(&rec, le->ts_ms);
-        cbor_encode_text_stringz(&rec, "c"); cbor_encode_uint(&rec, le->code);
-        cbor_encode_text_stringz(&rec, "ab");
-        CborEncoder ab;
-        cbor_encoder_create_array(&rec, &ab, 2);
-        cbor_encode_int(&ab, le->a);
-        cbor_encode_int(&ab, le->b);
-        cbor_encoder_close_container(&rec, &ab);
-        cbor_encoder_close_container(&arr2, &rec);
-    }
-    cbor_encoder_close_container(&map, &arr2);
+//    // logs: последние 32 записи
+//    uint16_t n = plc_log_count();
+//    uint16_t take = (n > 32) ? 32 : n;
+//    cbor_encode_text_stringz(&map, "log");
+//    CborEncoder arr2;
+//    cbor_encoder_create_array(&map, &arr2, take);
+//
+//    for (uint16_t i = 0; i < take; i++){
+//        uint16_t idx = ( (g_head + PLC_LOG_CAP) - (take - i) ) % PLC_LOG_CAP;
+//        PlcLogEntry *le = &g_log[idx];
+//        CborEncoder rec;
+//        cbor_encoder_create_map(&arr2, &rec, 3);
+//        cbor_encode_text_stringz(&rec, "t"); cbor_encode_uint(&rec, le->ts_ms);
+//        cbor_encode_text_stringz(&rec, "c"); cbor_encode_uint(&rec, le->code);
+//        cbor_encode_text_stringz(&rec, "ab");
+//        CborEncoder ab;
+//        cbor_encoder_create_array(&rec, &ab, 2);
+//        cbor_encode_int(&ab, le->a);
+//        cbor_encode_int(&ab, le->b);
+//        cbor_encoder_close_container(&rec, &ab);
+//        cbor_encoder_close_container(&arr2, &rec);
+//    }
+//    cbor_encoder_close_container(&map, &arr2);
 
     // закрыть корневую map
     if(!_ok(cbor_encoder_close_container(&root, &map))) goto send;

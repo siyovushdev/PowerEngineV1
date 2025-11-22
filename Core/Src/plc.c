@@ -460,6 +460,12 @@ void plc_tick(void) {
             g_needSwapGraph = false;
         }
         taskEXIT_CRITICAL();
+
+        // СБРОС ВСЕХ ВЫХОДОВ
+        plc_hw_reset_outputs();
+
+        plc_graph_reset_runtime(&g_activeGraph);
+
 #if PLC_LOG_ENABLED && PLC_LOG_ACTIVATE
         LOGT(PLC_LOG_TAG, "activate: swapped (nodes=%u, cycleMs=%u)",
              (unsigned) g_activeGraph.nodeCount, (unsigned) g_activeGraph.cycleMs);

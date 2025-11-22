@@ -212,6 +212,8 @@ void TaskComms(void* arg);
 */
 void init_rtos(void);
 
+void plc_hw_reset_outputs(void);
+
 
 #ifdef __cplusplus
 }

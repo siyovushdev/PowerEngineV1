@@ -263,3 +263,18 @@ void hw_write_pwm_output(int logicalCh, int dutyPercent)
 
     timer_set_ccr(m->htim, m->channel, ccr);
 }
+
+void plc_hw_reset_outputs(void)
+{
+    // --- Все дискретные выходы в 0 ---
+    hw_write_discrete_output(0, false); // PA5
+    hw_write_discrete_output(1, false); // PA6
+    hw_write_discrete_output(2, false); // PA7
+    hw_write_discrete_output(3, false); // PB0
+
+    // --- Все PWM-каналы в 0% duty ---
+    hw_write_pwm_output(0, 0); // PWM0 -> TIM1_CH1 PA8
+    hw_write_pwm_output(1, 0); // PWM1 -> TIM4_CH1 PB6
+    hw_write_pwm_output(2, 0); // PWM2 -> TIM4_CH2 PB7
+    hw_write_pwm_output(3, 0); // PWM3 -> TIM1_CH2 PA9
+}
