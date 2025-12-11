@@ -17,6 +17,11 @@ extern volatile uint16_t g_adcRaw[ADC_CH_NUM];
 #define PLC_NODE_FLAG_PID_CLAMP_0_100   (1u<<8)   // выход 0..100
 #define PLC_NODE_FLAG_PID_CLAMP_0_1     (1u<<9)   // выход 0..1
 
+// --- Размеры таблиц памяти ПЛК (можешь потом увеличить) ---
+#define PLC_MEM_BOOL_COUNT  32
+#define PLC_MEM_INT_COUNT   32
+#define PLC_MEM_REAL_COUNT  32
+
 typedef enum {
     PLC_VAL_BOOL  = 0,  // Логическое значение: 0 или 1 (дискретные сигналы, кнопки, реле, флаги)
     PLC_VAL_INT   = 1,  // Целое число (обычно 32-битное): используется для счётчиков, порогов, параметров
@@ -50,10 +55,38 @@ typedef enum {
     PLC_NODE_ANALOG_AVG = 23,  // сглаживание: y += alpha*(x - y); alpha = paramInt/1000
     PLC_NODE_RAMP       = 24,   // ограничение скорости: |y - prev| <= rate*dt; rate = paramInt/1000 ед/с
     PLC_NODE_LOG        = 25,  // лог: периодически пишет значение входа в plc_log
+    PLC_NODE_AO         = 26,  // Аналоговый выход (0..100%) -> ШИМ/DAC по номеру канала
+    PLC_NODE_CTU        = 27,  // Счётчик вверх: inA=CLK, inB=RST, paramInt=PV (preset)
+    PLC_NODE_CTD        = 28,  // Счётчик вниз: фронт inA (CLK) -> acc--, inB (RST) загружает preset из paramInt
+    PLC_NODE_CTUD       = 29,  // Счётчик вверх/вниз: inA = CU, inB = CD (пульсы); out.i = acc
+    PLC_NODE_WINDOW_CHECK = 30, // Проверка диапазона: MIN..MAX вокруг paramFloat (центр), ширина paramInt/1000
+    PLC_NODE_SAFE_OUTPUT  = 31, // Безопасный выход: нормальное управление + безопасное состояние при аварии
+    PLC_NODE_ALARM_GEN    = 32, // Генерация аварийного флага (обёртка над условием)
+    PLC_NODE_ALARM_LATCH  = 33, // Защёлкивающаяся авария: держит 1 до квитирования
+    PLC_NODE_HEARTBEAT    = 34, // "Сердцебиение": периодическое мигание для проверки живости ПЛК
+    // Узлы памяти (внутренние регистры)
+    PLC_NODE_MEM_BOOL     = 35, // Логическая переменная: чтение/запись bool по индексу
+    PLC_NODE_MEM_INT      = 36, // Целочисленная переменная: чтение/запись int32
+    PLC_NODE_MEM_REAL     = 37, // Вещественная переменная: чтение/запись float
+
+    PLC_NODE_FILTER_AVG   = 38, // Экспоненциальный фильтр: сглаживание аналогового сигнала
+    PLC_NODE_MATH_OP      = 39, // Базовые операции: +, -, *, / над двумя входами
+    PLC_NODE_CONST_FLOAT  = 40,  // константа float (уставки, коэффициенты)
+
+
 
 
 } PlcNodeType;
 
+// --- Доступ к памяти ПЛК (глобальные регистры) ---
+void     plc_mem_set_bool(uint16_t index, bool value);
+bool     plc_mem_get_bool(uint16_t index);
+
+void     plc_mem_set_int(uint16_t index, int32_t value);
+int32_t  plc_mem_get_int(uint16_t index);
+
+void     plc_mem_set_real(uint16_t index, float value);
+float    plc_mem_get_real(uint16_t index);
 
 // ──────────────────────────────────────────────────────────────
 // Флаг для поля flags (битовые настройки узла)
@@ -84,7 +117,7 @@ typedef struct {
     // Динамическая часть — формируется и изменяется во время работы
     // ────────────────────────────────
 
-    union {
+    struct {
         bool    b;  // Логическое значение (для дискретных узлов)
         int32_t i;  // Целое значение (для счётчиков, арифметики)
         float   f;  // Вещественное значение (для аналоговых сигналов)
@@ -123,6 +156,10 @@ typedef struct {
     bool   ramp_inited;
 
     uint32_t log_accum_ms;   // накопленное время с последней записи
+
+    //PLC_NODE_CTU states:
+    int32_t acc;
+    bool prev_clk;
 } PlcNode;
 
 typedef struct {
@@ -167,6 +204,15 @@ bool plc_upload_graph(const PlcGraph* src);
 
 // вызывается TaskComms при получении activate_graph
 bool plc_request_activate_graph(void);
+
+// принудительное управление выходом (DO / PWM)
+// nodeIndex — индекс узла в активном графе
+// value     — 0/1 (false/true)
+// holdMs    — сколько миллисекунд держать принудительное состояние
+bool plc_force_output(uint16_t nodeIndex, bool value, uint32_t holdMs);
+
+// снять форс, вернуть узел под управление графа
+bool plc_release_output(uint16_t nodeIndex);
 
 // основной тик ПЛК, вызывается TaskPlcScan в цикле
 void plc_tick(void);

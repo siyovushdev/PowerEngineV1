@@ -44,7 +44,7 @@
 #define PLC_LOG_DI 1
 #endif
 #ifndef PLC_LOG_AI
-#define PLC_LOG_AI 1
+#define PLC_LOG_AI 0
 #endif
 #ifndef PLC_LOG_AI_DELTA
 #define PLC_LOG_AI_DELTA 16  // сырой ADC: лог при изменении >= 16 ед.
@@ -58,10 +58,10 @@
 #endif
 
 #ifndef PLC_LOG_GRAPH
-#define PLC_LOG_GRAPH 1      // plc_graph_step(): события узлов (по изменениям)
+#define PLC_LOG_GRAPH 0      // plc_graph_step(): события узлов (по изменениям)
 #endif
 #ifndef PLC_PWM_DELTA
-#define PLC_PWM_DELTA 1      // PWM: лог при изменении duty >= 1%
+#define PLC_PWM_DELTA 0      // PWM: лог при изменении duty >= 1%
 #endif
 
 // ---- локальные состояния для подавления лишних логов
@@ -77,6 +77,12 @@ static uint8_t s_do_last[PLC_MAX_NODES];
 
 static uint8_t s_pwm_init[PLC_MAX_NODES];
 static int32_t s_pwm_last[PLC_MAX_NODES];
+
+// --- Глобальная память ПЛК ---
+// Можно сделать static, а доступ наружу через функции ниже
+static bool    s_memBool[PLC_MEM_BOOL_COUNT];
+static int32_t s_memInt[PLC_MEM_INT_COUNT];
+static float   s_memReal[PLC_MEM_REAL_COUNT];
 
 // Хартбит plc_tick()
 static uint32_t s_tick_last_hb = 0;
@@ -124,6 +130,13 @@ static void plc_node_reset_runtime(PlcNode *n) {
     n->force_en = false;
     n->force_bool = false;
     n->force_left_ms = 0;
+
+
+    n->log_accum_ms = 0;
+
+    // --- CTU / CTD / CTUD ---
+    n->acc = 0;
+    n->prev_clk = false;
 }
 
 void plc_graph_reset_runtime(PlcGraph *g) {
@@ -156,7 +169,7 @@ bool plc_validate_graph(PlcGraph *g) {
         }
 
         // --- 2. Проверка типа ---
-        if (n->type > PLC_NODE_LOG) {
+        if (n->type > PLC_NODE_CONST_FLOAT) {
             LOGT("PLC", "node[%u] type=%u > PLC_NODE_LIMIT", i, (unsigned) n->type);
             return false;
         }
@@ -176,6 +189,7 @@ bool plc_validate_graph(PlcGraph *g) {
         switch (n->type) {
 
             // Источники — не должны иметь входов
+            case PLC_NODE_CONST_FLOAT:
             case PLC_NODE_CONST_BOOL:
             case PLC_NODE_CONST_INT:
             case PLC_NODE_DIGITAL_IN:
@@ -196,6 +210,7 @@ bool plc_validate_graph(PlcGraph *g) {
             case PLC_NODE_PWM_OUT:
             case PLC_NODE_COMPARE_GT:
             case PLC_NODE_COMPARE_LT:
+            case PLC_NODE_AO:
                 if (n->inA < 0) {
                     LOGT("PLC", "node[%u] type=%u requires inA>=0", i, (unsigned) n->type);
                     return false;
@@ -320,6 +335,183 @@ bool plc_validate_graph(PlcGraph *g) {
                     return false;
                 }
                 break;
+            case PLC_NODE_CTD:
+            case PLC_NODE_CTU:
+                // inA — обязательный CLK
+                if (n->inA < 0) {
+                    LOGT("PLC", "node[%u] CTU requires inA>=0 (CLK)", i);
+                    return false;
+                }
+                // inB — опциональный RST, может быть -1
+                // paramInt — PV, допускаем 0 и больше
+                if (n->paramInt < 0) {
+                    LOGT("PLC", "node[%u] CTU paramInt(PV) must be >=0", i);
+                    return false;
+                }
+                // valueType: либо INT, либо BOOL
+                if (n->valueType != PLC_VAL_INT && n->valueType != PLC_VAL_BOOL) {
+                    LOGT("PLC", "node[%u] CTU valueType must be INT or BOOL", i);
+                    return false;
+                }
+                break;
+            case PLC_NODE_CTUD:
+                // Должен быть хотя бы один вход: CU (inA) или CD (inB)
+                if (n->inA < 0 && n->inB < 0) {
+                    LOGT("PLC", "node[%u] CTUD requires inA>=0 or inB>=0", i);
+                    return false;
+                }
+                // Для CTUD paramInt сейчас не используется, но проверим на >=0 для совместимости
+                if (n->paramInt < 0) {
+                    LOGT("PLC", "node[%u] CTUD paramInt must be >=0", i);
+                    return false;
+                }
+                break;
+            case PLC_NODE_WINDOW_CHECK:
+                // Требуется вход A (значение x)
+                if (n->inA < 0) {
+                    LOGT("PLC", "node[%u] WINDOW_CHECK requires inA>=0", i);
+                    return false;
+                }
+                // Ширина окна в тысячных, допускаем 0 и выше
+                if (n->paramInt < 0) {
+                    LOGT("PLC", "node[%u] WINDOW_CHECK paramInt(width*1000) must be >=0", i);
+                    return false;
+                }
+                // Выход, как правило, BOOL
+                if (n->valueType != PLC_VAL_BOOL) {
+                    LOGT("PLC", "node[%u] WINDOW_CHECK normally outputs BOOL, but valueType=%u",
+                         i, (unsigned)n->valueType);
+                }
+                break;
+
+            case PLC_NODE_SAFE_OUTPUT:
+                // Управляющий сигнал обязателен
+                if (n->inA < 0) {
+                    LOGT("PLC", "node[%u] SAFE_OUTPUT requires inA>=0 (normal value)", i);
+                    return false;
+                }
+                // inB (ALLOW) может быть -1 (тогда всегда разрешено)
+                // Тут без дополнительных проверок по param*
+                break;
+
+            case PLC_NODE_ALARM_GEN:
+                // Требуется условие (bool) на входе A
+                if (n->inA < 0) {
+                    LOGT("PLC", "node[%u] ALARM_GEN requires inA>=0 (condition)", i);
+                    return false;
+                }
+                if (n->valueType != PLC_VAL_BOOL) {
+                    LOGT("PLC", "node[%u] ALARM_GEN normally outputs BOOL, but valueType=%u",
+                         i, (unsigned)n->valueType);
+                }
+                break;
+
+            case PLC_NODE_ALARM_LATCH:
+                // inA — условие аварии, inB — ACK/RESET
+                if (n->inA < 0) {
+                    LOGT("PLC", "node[%u] ALARM_LATCH requires inA>=0 (condition)", i);
+                    return false;
+                }
+                // inB может быть -1, тогда квитирование не предусмотрено
+                if (n->valueType != PLC_VAL_BOOL) {
+                    LOGT("PLC", "node[%u] ALARM_LATCH normally outputs BOOL, but valueType=%u",
+                         i, (unsigned)n->valueType);
+                }
+                break;
+
+            case PLC_NODE_HEARTBEAT:
+                // Источник самогенерируемый — входов не должно быть
+                if (n->inA != -1 || n->inB != -1) {
+                    LOGT("PLC", "node[%u] HEARTBEAT must have inA=inB=-1", i);
+                    return false;
+                }
+                if (n->paramMs == 0u) {
+                    LOGT("PLC", "node[%u] HEARTBEAT paramMs must be >0", i);
+                    return false;
+                }
+                if (n->valueType != PLC_VAL_BOOL) {
+                    LOGT("PLC", "node[%u] HEARTBEAT normally outputs BOOL, but valueType=%u",
+                         i, (unsigned)n->valueType);
+                }
+                break;
+            case PLC_NODE_MEM_BOOL:
+                // Можно без входов (чистое чтение), либо с inA (запись) и опциональным inB (WE)
+                if (n->paramInt < 0 || n->paramInt >= PLC_MEM_BOOL_COUNT) {
+                    LOGT("PLC", "node[%u] MEM_BOOL paramInt(index) out of range: %d",
+                         i, (int)n->paramInt);
+                    return false;
+                }
+                if (n->valueType != PLC_VAL_BOOL) {
+                    LOGT("PLC", "node[%u] MEM_BOOL must have valueType=BOOL, got=%u",
+                         i, (unsigned)n->valueType);
+                    return false;
+                }
+                break;
+
+            case PLC_NODE_MEM_INT:
+                if (n->paramInt < 0 || n->paramInt >= PLC_MEM_INT_COUNT) {
+                    LOGT("PLC", "node[%u] MEM_INT paramInt(index) out of range: %d",
+                         i, (int)n->paramInt);
+                    return false;
+                }
+                if (n->valueType != PLC_VAL_INT) {
+                    LOGT("PLC", "node[%u] MEM_INT must have valueType=INT, got=%u",
+                         i, (unsigned)n->valueType);
+                    return false;
+                }
+                break;
+
+            case PLC_NODE_MEM_REAL:
+                if (n->paramInt < 0 || n->paramInt >= PLC_MEM_REAL_COUNT) {
+                    LOGT("PLC", "node[%u] MEM_REAL paramInt(index) out of range: %d",
+                         i, (int)n->paramInt);
+                    return false;
+                }
+                if (n->valueType != PLC_VAL_FLOAT) {
+                    LOGT("PLC", "node[%u] MEM_REAL must have valueType=FLOAT, got=%u",
+                         i, (unsigned)n->valueType);
+                    return false;
+                }
+                break;
+            case PLC_NODE_FILTER_AVG:
+                // Нужен вход A (аналоговый сигнал)
+                if (n->inA < 0) {
+                    LOGT("PLC", "node[%u] FILTER_AVG requires inA>=0", i);
+                    return false;
+                }
+                // alpha в тысячных, 0..1000 (0..1.0)
+                if (n->paramInt < 0 || n->paramInt > 1000) {
+                    LOGT("PLC", "node[%u] FILTER_AVG paramInt(alpha*1000) must be in [0..1000], got=%d",
+                         i, (int)n->paramInt);
+                    return false;
+                }
+                if (n->valueType != PLC_VAL_FLOAT) {
+                    LOGT("PLC", "node[%u] FILTER_AVG must have valueType=FLOAT, got=%u",
+                         i, (unsigned)n->valueType);
+                    return false;
+                }
+                break;
+
+            case PLC_NODE_MATH_OP:
+                // Два входа обязательны: A и B
+                if (n->inA < 0 || n->inB < 0) {
+                    LOGT("PLC", "node[%u] MATH_OP requires inA>=0 and inB>=0", i);
+                    return false;
+                }
+                // paramInt = код операции: 0=ADD,1=SUB,2=MUL,3=DIV
+                if (n->paramInt < 0 || n->paramInt > 3) {
+                    LOGT("PLC", "node[%u] MATH_OP paramInt(op) must be in [0..3], got=%d",
+                         i, (int)n->paramInt);
+                    return false;
+                }
+                // Поддерживаем INT и FLOAT
+                if (n->valueType != PLC_VAL_INT && n->valueType != PLC_VAL_FLOAT) {
+                    LOGT("PLC", "node[%u] MATH_OP must have valueType=INT or FLOAT, got=%u",
+                         i, (unsigned)n->valueType);
+                    return false;
+                }
+                break;
+
             default:
                 break;
         }
@@ -431,6 +623,113 @@ bool plc_request_activate_graph(void) {
     plc_log_put(PLC_EVT_ACTIVATE_OK, (int16_t)g_stagingGraph.nodeCount, (int16_t)g_stagingGraph.cycleMs);
     return true;
 }
+
+bool plc_release_output(uint16_t nodeIndex)
+{
+#if PLC_LOG_ENABLED && PLC_LOG_CMDS
+    LOGT(PLC_LOG_TAG, "release_output: req node=%u", (unsigned)nodeIndex);
+#endif
+
+    if (!g_activeGraphValid) {
+#if PLC_LOG_ENABLED && PLC_LOG_CMDS
+        LOGT(PLC_LOG_TAG, "release_output: no active graph");
+#endif
+        return false;
+    }
+
+    if (nodeIndex >= g_activeGraph.nodeCount) {
+#if PLC_LOG_ENABLED && PLC_LOG_CMDS
+        LOGT(PLC_LOG_TAG, "release_output: bad nodeIndex=%u (nodes=%u)",
+             (unsigned)nodeIndex, (unsigned)g_activeGraph.nodeCount);
+#endif
+        return false;
+    }
+
+    PlcNode *n = &g_activeGraph.nodes[nodeIndex];
+
+    // Смысла нет снимать форс с не-выходных узлов, но и не ошибка
+    if (n->type != PLC_NODE_DIGITAL_OUT &&
+        n->type != PLC_NODE_PWM_OUT &&
+        n->type != PLC_NODE_AO) {
+#if PLC_LOG_ENABLED && PLC_LOG_CMDS
+        LOGT(PLC_LOG_TAG, "release_output: node[%u] type=%u not DO/PWM",
+             (unsigned)nodeIndex, (unsigned)n->type);
+#endif
+        // можно вернуть true, чтобы на верхнем уровне не считалось ошибкой
+        return true;
+    }
+
+    taskENTER_CRITICAL();
+    {
+        n->force_en      = false;
+        n->flags        &= ~PLC_NODE_FLAG_FORCE;
+        n->force_left_ms = 0;
+        // force_bool можно не трогать, он больше не используется
+    }
+    taskEXIT_CRITICAL();
+
+#if PLC_LOG_ENABLED && PLC_LOG_CMDS
+    LOGT(PLC_LOG_TAG, "release_output: node[%u] OK", (unsigned)nodeIndex);
+#endif
+
+    return true;
+}
+
+
+bool plc_force_output(uint16_t nodeIndex, bool value, uint32_t holdMs)
+{
+#if PLC_LOG_ENABLED && PLC_LOG_CMDS
+    LOGT(PLC_LOG_TAG, "force_output: req node=%u val=%u holdMs=%u",
+         (unsigned)nodeIndex, (unsigned)value, (unsigned)holdMs);
+#endif
+
+    taskENTER_CRITICAL();
+    do {
+        if (!g_activeGraphValid) {
+#if PLC_LOG_ENABLED && PLC_LOG_CMDS
+            LOGT(PLC_LOG_TAG, "force_output: no active graph");
+#endif
+            break;
+        }
+
+        if (nodeIndex >= g_activeGraph.nodeCount) {
+#if PLC_LOG_ENABLED && PLC_LOG_CMDS
+            LOGT(PLC_LOG_TAG, "force_output: bad nodeIndex=%u (nodeCount=%u)",
+                 (unsigned)nodeIndex, (unsigned)g_activeGraph.nodeCount);
+#endif
+            break;
+        }
+
+        PlcNode *n = &g_activeGraph.nodes[nodeIndex];
+
+        if (n->type != PLC_NODE_DIGITAL_OUT &&
+            n->type != PLC_NODE_PWM_OUT &&
+            n->type != PLC_NODE_AO) {
+#if PLC_LOG_ENABLED && PLC_LOG_CMDS
+            LOGT(PLC_LOG_TAG, "force_output: node[%u] type=%u not DO/PWM",
+                 (unsigned)nodeIndex, (unsigned)n->type);
+#endif
+            break;
+        }
+
+        n->force_en      = true;
+        n->force_bool    = value;
+        n->force_left_ms = holdMs;
+        n->flags        |= PLC_NODE_FLAG_FORCE;
+
+#if PLC_LOG_ENABLED && PLC_LOG_CMDS
+        LOGT(PLC_LOG_TAG, "force_output: node[%u] en=1 val=%u left=%u",
+             (unsigned)nodeIndex, (unsigned)n->force_bool, (unsigned)n->force_left_ms);
+#endif
+
+        taskEXIT_CRITICAL();
+        return true;
+    } while (0);
+
+    taskEXIT_CRITICAL();
+    return false;
+}
+
 
 
 /* ================== Основной тик ПЛК (вызов из TaskPlcScan) ================== */
@@ -602,63 +901,33 @@ void plc_refresh_inputs_hw(PlcGraph *g) {
     }
 }
 
-void plc_apply_pending_cmds(PlcGraph *g, uint32_t dt_ms) {
-//    PlcCmd cmd;
-//    while (xQueueReceive(plcCmdQueue, &cmd, 0) == pdTRUE) {
-//#if PLC_LOG_ENABLED && PLC_LOG_CMDS
-//        LOGT(PLC_LOG_TAG, "cmd: type=%u node=%u val=%d holdMs=%u",
-//             (unsigned) cmd.type, (unsigned) cmd.nodeIndex, (int) cmd.value, (unsigned) cmd.holdMs);
-//#endif
-//        switch (cmd.type) {
-//            case CMD_FORCE_OUTPUT:
-//                if (cmd.nodeIndex < g->nodeCount) {
-//                    PlcNode *n = &g->nodes[cmd.nodeIndex];
-//                    if (n->type == PLC_NODE_DIGITAL_OUT || n->type == PLC_NODE_PWM_OUT) {
-//                        n->force_en = true;
-//                        n->force_bool = (cmd.value != 0);
-//                        n->force_left_ms = cmd.holdMs;
-//                        n->flags |= PLC_NODE_FLAG_FORCE;
-//#if PLC_LOG_ENABLED && PLC_LOG_CMDS
-//                        LOGT(PLC_LOG_TAG, "force: node[%u] en=1 val=%u left=%u",
-//                             (unsigned) cmd.nodeIndex, (unsigned) n->force_bool, (unsigned) n->force_left_ms);
-//#endif
-//                    }
-//                }
-//                break;
-//
-//            case CMD_SET_NODE_PARAM:
-//                if (cmd.nodeIndex < g->nodeCount) {
-//                    PlcNode *n = &g->nodes[cmd.nodeIndex];
-//                    n->paramInt = (int32_t) cmd.value;
-//#if PLC_LOG_ENABLED && PLC_LOG_CMDS
-//                    LOGT(PLC_LOG_TAG, "param: node[%u] paramInt=%d", (unsigned) cmd.nodeIndex, (int) n->paramInt);
-//#endif
-//                }
-//                break;
-//
-//            default:
-//                break;
-//        }
-//    }
-//
-//    // таймер принудительного режима
-//    for (uint16_t i = 0; i < g->nodeCount; i++) {
-//        PlcNode *n = &g->nodes[i];
-//        if (n->force_en) {
-//            if (n->force_left_ms <= dt_ms) {
-//                n->force_en = false;
-//                n->flags &= ~PLC_NODE_FLAG_FORCE;
-//                n->force_left_ms = 0;
-//#if PLC_LOG_ENABLED && PLC_LOG_CMDS
-//                LOGT(PLC_LOG_TAG, "force: node[%u] expired", (unsigned) i);
-//#endif
-//            } else {
-//                n->force_left_ms -= dt_ms;
-//            }
-//        }
-//    }
-}
+void plc_apply_pending_cmds(PlcGraph *g, uint32_t dt_ms)
+{
+    taskENTER_CRITICAL();
+    for (uint16_t i = 0; i < g->nodeCount; i++) {
+        PlcNode *n = &g->nodes[i];
 
+        if (n->force_en && (n->flags & PLC_NODE_FLAG_FORCE)) {
+
+            // 0 = бесконечный форс, таймер не считаем вообще
+            if (n->force_left_ms == 0) {
+                continue;
+            }
+
+            if (n->force_left_ms <= dt_ms) {
+                n->force_en      = false;
+                n->flags        &= ~PLC_NODE_FLAG_FORCE;
+                n->force_left_ms = 0;
+#if PLC_LOG_ENABLED && PLC_LOG_CMDS
+                LOGT(PLC_LOG_TAG, "force: node[%u] expired", (unsigned)i);
+#endif
+            } else {
+                n->force_left_ms -= dt_ms;
+            }
+        }
+    }
+    taskEXIT_CRITICAL();
+}
 
 static inline float get_float(const PlcNode *n) {
     if (!n) return 0.0f;
@@ -909,6 +1178,39 @@ void plc_graph_step(PlcGraph *g, uint32_t dt_ms) {
 #endif
                 break;
             }
+
+            case PLC_NODE_AO: {
+                // Вход как float: ожидаем диапазон 0..100 (%)
+                float v = a ? get_float(a) : 0.0f;
+                if (v < 0.0f)  v = 0.0f;
+                if (v > 100.0f) v = 100.0f;
+
+                // FORCE-режим (так же, как в PWM_OUT)
+                if (self->force_en && (self->flags & PLC_NODE_FLAG_FORCE)) {
+                    v = self->force_bool ? 100.0f : 0.0f;
+                }
+
+                // Переводим во внутренний duty % как int
+                int32_t duty = (int32_t)(v + 0.5f); // округление
+
+                // Физически: тот же PWM-канал, что и для PLC_NODE_PWM_OUT
+                hw_write_pwm_output(self->paramInt, duty);
+
+                // В статусе AO показываем именно float-процент
+                self->out.f = v;
+
+#if PLC_LOG_ENABLED && PLC_LOG_GRAPH
+                if (!s_pwm_init[i] || iabs32(duty - s_pwm_last[i]) >= PLC_PWM_DELTA) {
+        LOGT(PLC_LOG_TAG, "AO[%u] ch=%d -> %.1f%% (duty=%ld, force=%u)",
+             (unsigned)i, (int)self->paramInt, (double)v,
+             (long)duty, (unsigned)self->force_en);
+        s_pwm_init[i] = 1;
+        s_pwm_last[i] = duty;
+    }
+#endif
+                break;
+            }
+
 
             case PLC_NODE_MUX2: {
                 const PlcNode *s = (self->paramInt >= 0) ? &g->nodes[self->paramInt] : NULL;
@@ -1172,10 +1474,385 @@ void plc_graph_step(PlcGraph *g, uint32_t dt_ms) {
                 break;
             }
 
+            case PLC_NODE_CTU: {
+                bool clk = get_bool(a);
+                bool rst = (b ? get_bool(b) : false);
+
+                if (rst) {
+                    self->acc = 0;
+                }
+
+                bool rising = (clk && !self->prev_clk);
+                self->prev_clk = clk;
+
+                if (rising) {
+                    if (self->acc < INT32_MAX) {
+                        self->acc++;
+                    }
+                }
+
+                if (self->acc < 0)        self->acc = 0;
+                if (self->acc > INT32_MAX) self->acc = INT32_MAX;
+
+                // CV
+                self->out.i = self->acc;
+
+                // Q: достигнут порог PV (если задан)
+                if (self->paramInt > 0) {
+                    self->out.b = (self->acc >= self->paramInt);
+                } else {
+                    // Если PV == 0, можно считать Q = (acc > 0) или всегда false — на твой вкус
+                    self->out.b = (self->acc > 0);
+                }
+
+                break;
+            }
+            case PLC_NODE_CTD: {
+                bool clk = get_bool(a);
+                bool rst = (b ? get_bool(b) : false);
+
+                // RST загружает preset
+                if (rst) {
+                    self->acc = self->paramInt;
+                    if (self->acc < 0) self->acc = 0;
+                }
+
+                bool rising = (clk && !self->prev_clk);
+                self->prev_clk = clk;
+
+                if (rising && self->acc > 0) {
+                    self->acc--;
+                }
+
+                if (self->acc < 0)        self->acc = 0;
+                if (self->acc > INT32_MAX) self->acc = INT32_MAX;
+
+                self->out.i = self->acc;
+
+                // Q: счётчик «дошёл/ниже порога».
+                // Например, считаем, что Q=1 когда acc == 0.
+                if (self->paramInt > 0) {
+                    // вариант: Q = (acc <= 0) или (acc <= paramInt), как тебе удобнее
+                    self->out.b = (self->acc <= 0);
+                } else {
+                    self->out.b = (self->acc <= 0);
+                }
+
+                break;
+            }
+            case PLC_NODE_CTUD: {
+                bool cu = get_bool(a); // inA = CU
+                bool cd = get_bool(b); // inB = CD
+
+                bool clk_any = (cu || cd);
+                bool rising  = (clk_any && !self->prev_clk);
+                self->prev_clk = clk_any;
+
+                if (rising) {
+                    if (cu && !cd) {
+                        if (self->acc < INT32_MAX) self->acc++;
+                    } else if (cd && !cu) {
+                        if (self->acc > 0) self->acc--;
+                    }
+                    // cu && cd одновременно — игнорируем
+                }
+
+                if (self->acc < 0)        self->acc = 0;
+                if (self->acc > INT32_MAX) self->acc = INT32_MAX;
+
+                self->out.i = self->acc;
+
+                if (self->paramInt > 0) {
+                    self->out.b = (self->acc >= self->paramInt);
+                } else {
+                    self->out.b = (self->acc > 0);
+                }
+
+                break;
+            }
+
+                // --------- Новые узлы ---------
+
+            case PLC_NODE_WINDOW_CHECK: {
+                // x — как float (int тоже нормально сконвертируется)
+                float x = a ? get_float(a) : 0.0f;
+                float center = self->paramFloat;
+                float width  = (float)self->paramInt * 0.001f; // в тех же единицах, что x
+
+                float lo = center - width * 0.5f;
+                float hi = center + width * 0.5f;
+
+                self->out.b = (x >= lo && x <= hi);
+                break;
+            }
+
+            case PLC_NODE_SAFE_OUTPUT: {
+                bool allow = b ? get_bool(b) : true;  // если нет входа B — считаем, что всегда разрешено
+
+                switch (self->valueType) {
+                    case PLC_VAL_BOOL: {
+                        bool normal = a ? get_bool(a) : false;
+                        bool safe   = (self->paramInt != 0); // safe=1 или 0
+                        self->out.b = allow ? normal : safe;
+                        break;
+                    }
+
+                    case PLC_VAL_INT: {
+                        int32_t normal = a ? get_int(a) : 0;
+                        int32_t safe   = self->paramInt;
+                        self->out.i = allow ? normal : safe;
+                        break;
+                    }
+
+                    case PLC_VAL_FLOAT:
+                    default: {
+                        float normal = a ? get_float(a) : 0.0f;
+                        float safe   = self->paramFloat; // безопасное значение
+                        float y      = allow ? normal : safe;
+                        self->out.f = y;
+                        break;
+                    }
+                }
+                break;
+            }
+
+            case PLC_NODE_ALARM_GEN: {
+                bool cond = a ? get_bool(a) : false;
+                self->out.b = cond;
+                break;
+            }
+
+            case PLC_NODE_ALARM_LATCH: {
+                bool cond = a ? get_bool(a) : false;
+                bool ack  = b ? get_bool(b) : false;
+
+                if (ack) {
+                    self->sr_q = false;
+                } else if (cond) {
+                    self->sr_q = true;
+                }
+                self->out.b = self->sr_q;
+                break;
+            }
+
+            case PLC_NODE_HEARTBEAT: {
+                // Мигаем с периодом paramMs, используем log_accum_ms как накопитель
+                self->log_accum_ms += dt_ms;
+                if (self->log_accum_ms >= self->paramMs) {
+                    self->log_accum_ms -= self->paramMs;
+                    self->out.b = !self->out.b;
+                }
+                break;
+            }
+            case PLC_NODE_MEM_BOOL: {
+                uint16_t idx = (uint16_t) self->paramInt;
+                if (idx >= PLC_MEM_BOOL_COUNT) {
+                    // не должен сюда попасть, валидация уже отфильтровала, но на всякий случай
+                    self->out.b = false;
+                    break;
+                }
+
+                bool val = s_memBool[idx];
+
+                // Если есть вход A — это источник нового значения
+                if (self->inA >= 0 && a) {
+                    // Если есть вход B — используем как WE (write enable)
+                    bool we = true;
+                    if (self->inB >= 0 && b) {
+                        we = get_bool(b);
+                    }
+                    if (we) {
+                        val = get_bool(a);
+                        s_memBool[idx] = val;
+                    }
+                }
+
+                self->out.b = val;
+                break;
+            }
+
+            case PLC_NODE_MEM_INT: {
+                uint16_t idx = (uint16_t) self->paramInt;
+                if (idx >= PLC_MEM_INT_COUNT) {
+                    self->out.i = 0;
+                    break;
+                }
+
+                int32_t val = s_memInt[idx];
+
+                if (self->inA >= 0 && a) {
+                    bool we = true;
+                    if (self->inB >= 0 && b) {
+                        we = get_bool(b);
+                    }
+                    if (we) {
+                        val = get_int(a);
+                        s_memInt[idx] = val;
+                    }
+                }
+
+                self->out.i = val;
+                break;
+            }
+
+            case PLC_NODE_MEM_REAL: {
+                uint16_t idx = (uint16_t) self->paramInt;
+                if (idx >= PLC_MEM_REAL_COUNT) {
+                    self->out.f = 0.0f;
+                    break;
+                }
+
+                float val = s_memReal[idx];
+
+                if (self->inA >= 0 && a) {
+                    bool we = true;
+                    if (self->inB >= 0 && b) {
+                        we = get_bool(b);
+                    }
+                    if (we) {
+                        val = get_float(a);
+                        s_memReal[idx] = val;
+                    }
+                }
+
+                self->out.f = val;
+                break;
+            }
+            case PLC_NODE_FILTER_AVG: {
+                // Вход как float (int тоже конвертируется через get_float)
+                float x = a ? get_float(a) : 0.0f;
+
+                // alpha в [0..1.0]
+                float alpha = (float)self->paramInt * 0.001f;
+                if (alpha <= 0.0f) {
+                    // alpha=0 -> "заморозить" фильтр, просто держим текущее значение out.f
+                    // можно также сделать out.f = x, если нужно мгновенное следование
+                    // сейчас оставляем как есть
+                    // self->out.f = self->out.f;
+                } else if (alpha >= 1.0f) {
+                    // alpha=1 -> без фильтрации
+                    self->out.f = x;
+                } else {
+                    float y_prev = self->out.f;
+                    float y = y_prev + alpha * (x - y_prev);
+                    self->out.f = y;
+                }
+                break;
+            }
+            case PLC_NODE_MATH_OP: {
+                int op = self->paramInt; // 0=ADD,1=SUB,2=MUL,3=DIV
+
+                switch (self->valueType) {
+                    case PLC_VAL_INT: {
+                        int32_t va = a ? get_int(a) : 0;
+                        int32_t vb = b ? get_int(b) : 0;
+                        int32_t r = 0;
+
+                        switch (op) {
+                            case 0: // ADD
+                                r = va + vb;
+                                break;
+                            case 1: // SUB
+                                r = va - vb;
+                                break;
+                            case 2: // MUL
+                                r = va * vb;
+                                break;
+                            case 3: // DIV
+                                if (vb == 0) {
+                                    // деление на 0: оставим предыдущее значение
+                                    r = self->out.i;
+                                } else {
+                                    r = va / vb;
+                                }
+                                break;
+                            default:
+                                r = 0;
+                                break;
+                        }
+
+                        self->out.i = r;
+                        break;
+                    }
+                    case PLC_VAL_FLOAT:
+                    default: {
+                        float va = a ? get_float(a) : 0.0f;
+                        float vb = b ? get_float(b) : 0.0f;
+                        float r  = 0.0f;
+
+                        switch (op) {
+                            case 0: // ADD
+                                r = va + vb;
+                                break;
+                            case 1: // SUB
+                                r = va - vb;
+                                break;
+                            case 2: // MUL
+                                r = va * vb;
+                                break;
+                            case 3: // DIV
+                                if (vb == 0.0f) {
+                                    // деление на 0: оставим предыдущее значение
+                                    r = self->out.f;
+                                } else {
+                                    r = va / vb;
+                                }
+                                break;
+                            default:
+                                r = 0.0f;
+                                break;
+                        }
+
+                        self->out.f = r;
+                        break;
+                    }
+                }
+
+                break;
+            }
+            case PLC_NODE_CONST_FLOAT: {
+                self->out.f = self->paramFloat;
+                break;
+            }
 
             default:
                 // неизвестный тип
                 break;
         }
     }
+}
+
+
+
+
+// --- Реализация API доступа к памяти ПЛК ---
+
+void plc_mem_set_bool(uint16_t index, bool value) {
+    if (index >= PLC_MEM_BOOL_COUNT) return;
+    s_memBool[index] = value;
+}
+
+bool plc_mem_get_bool(uint16_t index) {
+    if (index >= PLC_MEM_BOOL_COUNT) return false;
+    return s_memBool[index];
+}
+
+void plc_mem_set_int(uint16_t index, int32_t value) {
+    if (index >= PLC_MEM_INT_COUNT) return;
+    s_memInt[index] = value;
+}
+
+int32_t plc_mem_get_int(uint16_t index) {
+    if (index >= PLC_MEM_INT_COUNT) return 0;
+    return s_memInt[index];
+}
+
+void plc_mem_set_real(uint16_t index, float value) {
+    if (index >= PLC_MEM_REAL_COUNT) return;
+    s_memReal[index] = value;
+}
+
+float plc_mem_get_real(uint16_t index) {
+    if (index >= PLC_MEM_REAL_COUNT) return 0.0f;
+    return s_memReal[index];
 }

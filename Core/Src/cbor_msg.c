@@ -316,11 +316,15 @@ void send_status_reply(CborReply *out)
                 cbor_encode_float(&nmap, n->out.f);
             }
             if (n->flags & PLC_NODE_FLAG_FORCE) {
-                if(!_ok(cbor_encode_text_stringz(&nmap, "force"))) goto ns_close;
-                if(!_ok(cbor_encode_boolean(&nmap, n->force_en))) goto ns_close;
+                // узел в режиме форса
+                cbor_encode_text_stringz(&nmap, "forceActive");
+                cbor_encode_boolean(&nmap, true);
 
-                if(!_ok(cbor_encode_text_stringz(&nmap, "forceLeftMs"))) goto ns_close;
-                if(!_ok(cbor_encode_uint(&nmap, n->force_left_ms))) goto ns_close;
+                cbor_encode_text_stringz(&nmap, "forceValue");
+                cbor_encode_boolean(&nmap, n->force_bool);  // 0/1 для DO/PWM
+
+                cbor_encode_text_stringz(&nmap, "forceLeftMs");
+                cbor_encode_uint(&nmap, n->force_left_ms);
             }
 
             if(!_ok(cbor_encoder_close_container(&arr, &nmap))) { taskEXIT_CRITICAL(); goto send; }
@@ -366,6 +370,7 @@ void send_status_reply(CborReply *out)
     send:
     out->len = (uint16_t)cbor_encoder_get_buffer_size(&root, out->data);
 }
+
 
 static void send_upload_graph_ack(bool ok, CborReply *out)
 {
@@ -425,6 +430,11 @@ static void send_simple_ack(const char* cmdName, bool ok, CborReply *out)
 
 static void send_activate_graph_ack(bool ok, CborReply *out)  { send_simple_ack("activate_graph_ack", ok, out); }
 static void send_force_output_ack(bool ok, CborReply *out)    { send_simple_ack("force_output_ack", ok, out); }
+
+static void send_release_output_ack(bool ok, CborReply *out)
+{
+    send_simple_ack("release_output_ack", ok, out);
+}
 
 extern const PlcLogEntry* plc_log_get_by_index(uint16_t idx);
 void send_log_dump_reply(CborReply *out)
@@ -828,7 +838,6 @@ static CborError decode_graph(CborValue *graphMapIt, PlcGraph *outGraph) {
     return err;
 }
 
-
 // Эта функция вызывается после того как мы приняли и проверили кадр (CRC и т.д.)
 bool parse_cmd_upload_graph(CborValue root) {
     LOGT(tag, "parse_cmd_upload_graph: start");
@@ -868,6 +877,81 @@ bool parse_cmd_upload_graph(CborValue root) {
     return ok;
 }
 
+// cmd = "release_output"
+// {
+//   "cmd": "release_output",
+//   "nodeIndex": <int>
+// }
+static bool parse_cmd_release_output(CborValue root)
+{
+    CborValue val;
+    int32_t nodeIdx32;
+
+    if (!map_find(&root, "nodeIndex", &val) || !get_int32(&val, &nodeIdx32)) {
+        LOGT(tag, "release_output: 'nodeIndex' missing or bad");
+        return false;
+    }
+
+    if (nodeIdx32 < 0 || nodeIdx32 >= PLC_MAX_NODES) {
+        LOGT(tag, "release_output: nodeIndex=%ld out of range", (long)nodeIdx32);
+        return false;
+    }
+
+    bool ok = plc_release_output((uint16_t)nodeIdx32);
+
+    LOGT(tag, "release_output: node=%ld -> %s",
+         (long)nodeIdx32, ok ? "OK" : "FAIL");
+
+    return ok;
+}
+
+
+// cmd = "force_output"
+// {
+//   "cmd": "force_output",
+//   "nodeIndex": <int>,
+//   "value": <0|1>,
+//   "holdMs": <uint, ms>
+// }
+static bool parse_cmd_force_output(CborValue root)
+{
+    CborValue val;
+    int32_t  nodeIdx32;
+    int32_t  value32;
+    uint32_t holdMs = 0;
+
+    if (!map_find(&root, "nodeIndex", &val) || !get_int32(&val, &nodeIdx32)) {
+        LOGT(tag, "force_output: 'nodeIndex' missing or bad");
+        return false;
+    }
+
+    if (nodeIdx32 < 0 || nodeIdx32 >= PLC_MAX_NODES) {
+        LOGT(tag, "force_output: nodeIndex=%ld out of range", (long)nodeIdx32);
+        return false;
+    }
+
+    if (!map_find(&root, "value", &val) || !get_int32(&val, &value32)) {
+        LOGT(tag, "force_output: 'value' missing or bad");
+        return false;
+    }
+
+    if (map_find(&root, "holdMs", &val)) {
+        if (!get_uint32(&val, &holdMs)) {
+            LOGT(tag, "force_output: 'holdMs' type error");
+            return false;
+        }
+    } else {
+        holdMs = 0; // если нужно, можно задать дефолт, например 1000
+    }
+
+    bool ok = plc_force_output((uint16_t)nodeIdx32, (value32 != 0), holdMs);
+
+    LOGT(tag, "force_output: node=%ld val=%ld holdMs=%lu -> %s",
+         (long)nodeIdx32, (long)value32, (unsigned long)holdMs,
+         ok ? "OK" : "FAIL");
+
+    return ok;
+}
 
 
 bool decode_graph_from_cbor(const uint8_t* buf, size_t len, PlcGraph* outG){
@@ -960,6 +1044,17 @@ void on_cbor_frame_received(const uint8_t *buf, size_t len, CborReply* out) {
         return;
     }
 
+    if (strcmp(cmdBuf, "force_output") == 0) {
+        bool ok = parse_cmd_force_output(root);
+        send_force_output_ack(ok, out);
+        return;
+    }
+
+    if (strcmp(cmdBuf, "release_output") == 0) {
+        bool ok = parse_cmd_release_output(root);
+        send_release_output_ack(ok, out);
+        return;
+    }
 
     LOGT(tag, "unknown cmd");
 }
