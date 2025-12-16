@@ -10,7 +10,7 @@ extern "C" {
 extern volatile uint16_t g_adcRaw[ADC_CH_NUM];
 
 /* ================== Константы и типы ================== */
-#define PLC_MAX_NODES 64          // подбери под свою память
+#define PLC_MAX_NODES 40          // подбери под свою память
 #define PLC_CYCLE_MS_MIN 5        // защита от слишком частого цикла
 #define PLC_CYCLE_MS_MAX 100      // защита от слишком редкого цикла
 
@@ -21,6 +21,17 @@ extern volatile uint16_t g_adcRaw[ADC_CH_NUM];
 #define PLC_MEM_BOOL_COUNT  32
 #define PLC_MEM_INT_COUNT   32
 #define PLC_MEM_REAL_COUNT  32
+
+// ===== PWM/AO deadband =====
+// Сколько процентов считать "нулём"
+#ifndef PLC_PWM_DEADBAND_OFF_PCT
+#define PLC_PWM_DEADBAND_OFF_PCT   2   // если <=2% -> считаем 0
+#endif
+
+// Гистерезис включения: чтобы после "выкл" включалось не сразу
+#ifndef PLC_PWM_DEADBAND_ON_PCT
+#define PLC_PWM_DEADBAND_ON_PCT    3   // включать только если >=3%
+#endif
 
 typedef enum {
     PLC_VAL_BOOL  = 0,  // Логическое значение: 0 или 1 (дискретные сигналы, кнопки, реле, флаги)
@@ -160,6 +171,9 @@ typedef struct {
     //PLC_NODE_CTU states:
     int32_t acc;
     bool prev_clk;
+
+    // Deadband state for PWM/AO
+    bool pwm_zero_hold;  // держим выход в 0 из-за deadband
 } PlcNode;
 
 typedef struct {

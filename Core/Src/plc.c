@@ -137,6 +137,8 @@ static void plc_node_reset_runtime(PlcNode *n) {
     // --- CTU / CTD / CTUD ---
     n->acc = 0;
     n->prev_clk = false;
+
+    n->pwm_zero_hold = false;
 }
 
 void plc_graph_reset_runtime(PlcGraph *g) {
@@ -1160,56 +1162,91 @@ void plc_graph_step(PlcGraph *g, uint32_t dt_ms) {
 
             case PLC_NODE_PWM_OUT: {
                 int32_t duty = get_int(a);
+
                 if (duty < 0) duty = 0;
                 if (duty > 100) duty = 100;
+
+                // FORCE
                 if (self->force_en && (self->flags & PLC_NODE_FLAG_FORCE)) {
                     duty = self->force_bool ? 100 : 0;
+                    self->pwm_zero_hold = false; // форс игнорирует deadband
+                } else {
+                    // Deadband + hysteresis near zero
+                    if (!self->pwm_zero_hold) {
+                        // если мы "в норме" и пришли в зону выключения -> зафиксировать 0
+                        if (duty <= PLC_PWM_DEADBAND_OFF_PCT) {
+                            self->pwm_zero_hold = true;
+                        }
+                    } else {
+                        // если мы в "нулевой фиксации", включаем только когда перешли порог включения
+                        if (duty >= PLC_PWM_DEADBAND_ON_PCT) {
+                            self->pwm_zero_hold = false;
+                        }
+                    }
+
+                    if (self->pwm_zero_hold) duty = 0;
                 }
+
                 hw_write_pwm_output(self->paramInt, duty);
                 self->out.i = duty;
 
 #if PLC_LOG_ENABLED && PLC_LOG_GRAPH
                 if (!s_pwm_init[i] || iabs32(duty - s_pwm_last[i]) >= PLC_PWM_DELTA) {
-                    LOGT(PLC_LOG_TAG, "PWM[%u] ch=%d -> %ld%% (force=%u)",
-                         (unsigned) i, (int) self->paramInt, (long) duty, (unsigned) self->force_en);
-                    s_pwm_init[i] = 1;
-                    s_pwm_last[i] = duty;
-                }
-#endif
-                break;
-            }
-
-            case PLC_NODE_AO: {
-                // Вход как float: ожидаем диапазон 0..100 (%)
-                float v = a ? get_float(a) : 0.0f;
-                if (v < 0.0f)  v = 0.0f;
-                if (v > 100.0f) v = 100.0f;
-
-                // FORCE-режим (так же, как в PWM_OUT)
-                if (self->force_en && (self->flags & PLC_NODE_FLAG_FORCE)) {
-                    v = self->force_bool ? 100.0f : 0.0f;
-                }
-
-                // Переводим во внутренний duty % как int
-                int32_t duty = (int32_t)(v + 0.5f); // округление
-
-                // Физически: тот же PWM-канал, что и для PLC_NODE_PWM_OUT
-                hw_write_pwm_output(self->paramInt, duty);
-
-                // В статусе AO показываем именно float-процент
-                self->out.f = v;
-
-#if PLC_LOG_ENABLED && PLC_LOG_GRAPH
-                if (!s_pwm_init[i] || iabs32(duty - s_pwm_last[i]) >= PLC_PWM_DELTA) {
-        LOGT(PLC_LOG_TAG, "AO[%u] ch=%d -> %.1f%% (duty=%ld, force=%u)",
-             (unsigned)i, (int)self->paramInt, (double)v,
-             (long)duty, (unsigned)self->force_en);
+        LOGT(PLC_LOG_TAG, "PWM[%u] ch=%d -> %ld%% (force=%u hold0=%u)",
+             (unsigned)i, (int)self->paramInt, (long)duty,
+             (unsigned)self->force_en, (unsigned)self->pwm_zero_hold);
         s_pwm_init[i] = 1;
         s_pwm_last[i] = duty;
     }
 #endif
                 break;
             }
+
+
+            case PLC_NODE_AO: {
+                // Вход как float: ожидаем диапазон 0..100 (%)
+                float v = a ? get_float(a) : 0.0f;
+
+                if (v < 0.0f)   v = 0.0f;
+                if (v > 100.0f) v = 100.0f;
+
+                // FORCE
+                if (self->force_en && (self->flags & PLC_NODE_FLAG_FORCE)) {
+                    v = self->force_bool ? 100.0f : 0.0f;
+                    self->pwm_zero_hold = false;
+                } else {
+                    // Deadband + hysteresis for AO (percent)
+                    if (!self->pwm_zero_hold) {
+                        if (v <= (float)PLC_PWM_DEADBAND_OFF_PCT) {
+                            self->pwm_zero_hold = true;
+                        }
+                    } else {
+                        if (v >= (float)PLC_PWM_DEADBAND_ON_PCT) {
+                            self->pwm_zero_hold = false;
+                        }
+                    }
+
+                    if (self->pwm_zero_hold) v = 0.0f;
+                }
+
+                int32_t duty = (int32_t)(v + 0.5f); // округление 0..100
+
+                hw_write_pwm_output(self->paramInt, duty);
+
+                self->out.f = v;
+
+#if PLC_LOG_ENABLED && PLC_LOG_GRAPH
+                if (!s_pwm_init[i] || iabs32(duty - s_pwm_last[i]) >= PLC_PWM_DELTA) {
+        LOGT(PLC_LOG_TAG, "AO[%u] ch=%d -> %.1f%% (duty=%ld, force=%u hold0=%u)",
+             (unsigned)i, (int)self->paramInt, (double)v,
+             (long)duty, (unsigned)self->force_en, (unsigned)self->pwm_zero_hold);
+        s_pwm_init[i] = 1;
+        s_pwm_last[i] = duty;
+    }
+#endif
+                break;
+            }
+
 
 
             case PLC_NODE_MUX2: {
